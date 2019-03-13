@@ -1,0 +1,436 @@
+//*****************************************************************************
+// Title: Throttler Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "Throttler",
+	"description": "The Throttler Analytic removes repeated events from the output stream for a certain period.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Throttler.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to throttle"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Throttled",
+			"description": "Throttled data channel"
+		}
+	],
+	"properties": [
+		{
+			"name": "timeWindow",
+			"description": "How long to suppress events for.",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Must be greater than 0' }",
+			"defaultValue": 60.0,
+			"optional": true,
+			"postfix": "(Seconds)"
+		},{
+			"name": "matchDValue",
+			"description": "Throttling only happens if the dValue of the previous event matches the current event.",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "matchSValue",
+			"description": "Throttling only happens if the sValue of the previous event matches the current event.",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "matchXValue",
+			"description": "Throttling only happens if the xValue of the previous event matches the current event.",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "matchYValue",
+			"description": "Throttling only happens if the yValue of the previous event matches the current event.",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "matchZValue",
+			"description": "Throttling only happens if the zValue of the previous event matches the current event.",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "matchParams",
+			"description": "Throttling only happens if these params on the previous event match the current event.",
+			"type": "string",
+			"defaultValue": "[]",
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }",
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "matchType",
+			"description": "Throttling only happens if the type of the previous event matches the current event.",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "bySourceId",
+			"description": "If defined, the throttling of Data events is partitioned by the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced": true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Throttler Analytic removes repeated events from the output stream.
+ * 
+ *  By default the throttler will throttle any events with the same sourceId, this can be futher limited to throttle only
+ *  if a particular value is the same for the previous event as the current event. This is particularly useful for removing duplicated values.
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>The duration to throttle events for.</td>
+ *      <td>Stringified decimal <font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">60.0d"</font></td></tr>
+ *  <tr><td><b>matchDValue</b></td><td>Throttling only happens if the dValue of the previous event matches the current event.</td>
+ *      <td>true or false</td><td>String</td><td>False</td><td>False</td></tr>
+ *  <tr><td><b>matchSValue</b></td><td>Throttling only happens if the sValue of the previous event matches the current event.</td>
+ *      <td>true or false</td><td>String</td><td>False</td><td>False</td></tr>
+ *  <tr><td><b>matchXValue</b></td><td>Throttling only happens if the xValue of the previous event matches the current event.</td>
+ *      <td>true or false</td><td>String</td><td>False</td><td>False</td></tr>
+ *  <tr><td><b>matchYValue</b></td><td>Throttling only happens if the yValue of the previous event matches the current event.</td>
+ *      <td>true or false</td><td>String</td><td>False</td><td>False</td></tr>
+ *  <tr><td><b>matchZValue</b></td><td>Throttling only happens if the zValue of the previous event matches the current event.</td>
+ *      <td>true or false</td><td>String</td><td>False</td><td>False</td></tr>
+ *  <tr><td><b>matchType</b></td><td>Throttling only happens if the type of the previous event matches the current event.</td>
+ *      <td>true or false</td><td>String</td><td>False</td><td>False</td></tr>
+ *  <tr><td><b>matchParams</b></td><td>Throttling only happens if these params on the previous event match the current event.</td>
+ *      <td>Stringified sequence of param names</td><td>sequence&lt;string&gt;</td><td>False</td><td>[]</td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the throttling of Data events is partitioned by the <font face="courier" size="-1">sourceId</font> parameter of the input data stream</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Thottler Analytic which takes Data events on the channel "Input1"  
+// and prevents any Data events with the same sourceId from being published onto 
+// the output channel "Output1" within a 20.0 second time window.
+send com.industry.analytics.Analytic("Throttler", ["Input1"], ["Output1"], { "timeWindow":"20.0d" } ) to "";
+
+// Same as above, but only throttle if the Data events have the same dValue.
+// Useful for removing duplicates (use a timeWindow of "Infinity" to remove all back-to-back duplicates)
+send com.industry.analytics.Analytic("Throttler", ["Input1"], ["Output1"], { "timeWindow":"20.0d", "matchDValue":"true" } ) to "";
+</code></dd>
+ *</dl>
+ */
+event Throttler
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Throttler";
+	
+	constant string BY_SOURCEID := "bySourceID";
+	constant string MATCH_DVALUE := "matchDValue";
+	constant string MATCH_SVALUE := "matchSValue";
+	constant string MATCH_XVALUE := "matchXValue";
+	constant string MATCH_YVALUE := "matchYValue";
+	constant string MATCH_ZVALUE := "matchZValue";
+	constant string MATCH_PARAMS := "matchParams";
+	constant string MATCH_TYPE := "matchType";
+	constant string TIMEWINDOW := "timeWindow";
+	
+	/** @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__INTERNAL_SOURCE_ID__";
+	
+	/** @private */
+	boolean _bySourceId;
+	/** @private */
+	boolean _matchDValue;
+	/** @private */
+	boolean _matchSValue;
+	/** @private */
+	boolean _matchXValue;
+	/** @private */
+	boolean _matchYValue;
+	/** @private */
+	boolean _matchZValue;
+	/** @private */
+	sequence<string> _matchParams;
+	/** @private */
+	boolean _matchType;
+	/** @private */
+	decimal _timeWindow;
+	
+	/** @private */
+	dictionary<string, Data> _previousDataBySourceId;
+	
+	/** @private */
+	string _outputDataName;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ BY_SOURCEID, MATCH_DVALUE, MATCH_SVALUE,
+		      		                               MATCH_XVALUE,  MATCH_YVALUE,  
+		      		                               MATCH_ZVALUE,   MATCH_PARAMS,   
+		      		                               MATCH_TYPE,   TIMEWINDOW ],
+		      		                             [ Constants.BOOLEAN,  Constants.BOOLEAN, Constants.BOOLEAN,
+		      		                               Constants.BOOLEAN,  Constants.BOOLEAN, 
+		      		                               Constants.BOOLEAN,  Constants.STRING, 
+		      		                               Constants.BOOLEAN, Constants.DECIMAL ],
+		      		                           	 [ false, false, false,
+		      		                           	   false, false, 
+		      		                           	   false, false, 
+		      		                           	   false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+
+			
+			_bySourceId := config.getOrBoolean(BY_SOURCEID, true);
+			_matchDValue := config.getOrBoolean(MATCH_DVALUE, false);
+			_matchSValue := config.getOrBoolean(MATCH_SVALUE, false);
+			_matchXValue := config.getOrBoolean(MATCH_XVALUE, false);
+			_matchYValue := config.getOrBoolean(MATCH_YVALUE, false);
+			_matchZValue := config.getOrBoolean(MATCH_ZVALUE, false);
+			_matchType := config.getOrBoolean(MATCH_TYPE, false);
+			
+			string paramsAsString := config.getSequenceAsString(MATCH_PARAMS);
+			if _matchParams.canParse(paramsAsString) {
+				_matchParams := _matchParams.parse(paramsAsString);
+			} else {
+				result := false;
+				log "  Param "+ MATCH_PARAMS + " must be a stringified sequence of param names." at ERROR;
+			}
+			
+			_timeWindow := config.getOrDecimal(TIMEWINDOW, 60.0d);
+			if _timeWindow < 0.0d {
+				result := false;
+				log "  Param "+ TIMEWINDOW + " must be >= 0." at ERROR;
+			}
+		}
+
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		// If not partitioning by sourceId then we only need to store 1 value in dictionary so use a single fixed key
+		string sourceId := dataIn.sourceId;
+		if not _bySourceId {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		if not _previousDataBySourceId.hasKey(sourceId) {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		
+		Data triggeringData := _previousDataBySourceId[sourceId];
+		
+		if triggeringData.timestamp + _timeWindow <= dataIn.timestamp {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+
+		if _matchDValue and triggeringData.dValue != dataIn.dValue {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		if _matchSValue and triggeringData.sValue != dataIn.sValue {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		if _matchXValue and triggeringData.xValue != dataIn.xValue {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		if _matchYValue and triggeringData.yValue != dataIn.yValue {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		if _matchZValue and triggeringData.zValue != dataIn.zValue {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		if _matchType and triggeringData.type != dataIn.type {
+			updateAndSend(sourceId, dataIn);
+			return;
+		}
+		string param;
+		for param in _matchParams {
+			if dataIn.params.hasKey(param) != triggeringData.params.hasKey(param) or dataIn.params.getOr(param, "") != triggeringData.params.getOr(param, "") {
+				updateAndSend(sourceId, dataIn);
+				return;
+			}
+		}
+	}
+	
+	/** @private */
+	action updateAndSend(string sourceId, Data dataIn) {
+		_previousDataBySourceId.add(sourceId, dataIn);
+		Data dataOut := dataIn.clone();
+		dataOut.streamName := _outputDataName;
+		if( dataOut.type = DataConstants.RAW ) then {
+			dataOut.type := DataConstants.COMPUTED;
+		}
+		_analyticObject.sendData(dataOut);
+	}
+
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset() {
+		_previousDataBySourceId.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Suppressor Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternThrottler {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Throttler.NAME.intern();
+		discard := Throttler.BY_SOURCEID.intern();
+		discard := Throttler.MATCH_DVALUE.intern();
+		discard := Throttler.MATCH_SVALUE.intern();
+		discard := Throttler.MATCH_XVALUE.intern();
+		discard := Throttler.MATCH_YVALUE.intern();
+		discard := Throttler.MATCH_ZVALUE.intern();
+		discard := Throttler.MATCH_PARAMS.intern();
+		discard := Throttler.MATCH_TYPE.intern();
+		discard := Throttler.TIMEWINDOW.intern();
+		
+		on all StayAlive() {}
+	}
+}
+

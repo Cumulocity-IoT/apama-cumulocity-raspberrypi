@@ -1,0 +1,154 @@
+//*****************************************************************************
+// Title:         VersioningService
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+/**
+ *  Applications can send this event to the Versioning Service on the
+ *  Analytics Management Channel to check that the version that they 
+ *  are using is compatible with this version of the Industry Analytics Kit.  
+ *
+ *  If a blank string is provided, then this will be treated as a request
+ *  to get the current version of the Industry Analytics Kit.
+ * 
+ *  The VersioningService monitor will respond by sending the CurrentVersion 
+ *  event to the Analytics Management Channel.
+ * 
+ *  @see com.industry.analytics.CurrentVersion  This event is sent in response to this request
+ *  @see com.industry.analytics.Constants.MANAGEMENT_CHANNEL  The constant that defines the name of the Analytics Management Channel
+ */
+event CheckVersion {
+	/** This parameter defines the version of the Industry Analytics Kit that 
+	 *  your application wants to use. If a blank string is provided, then 
+	 *  this will be treated as a request to get the current version 
+	 *  of the Industry Analytics Kit. */
+	string version;
+}
+
+/**
+ *  This event is sent from the Versioning Service in response to the 
+ *  the CheckVersion event that requests the current version and whether the 
+ *  version provided in the request is compatible with this version of the 
+ *  Industry Analytics Kit.   
+ *
+ *  @see com.industry.analytics.CheckVersion  This event is sent to the VersioningService to request the version compatibility check.
+ *  @see com.industry.analytics.Constants.MANAGEMENT_CHANNEL  The constant that defines the name of the Analytics Management Channel
+ */
+event CurrentVersion {
+	/** This parameter defines the current version of the Industry Analytics Kit. */
+	string  currentVersion;
+	/** This boolean parameter indicates whether or not version provided in the  
+	 *  CheckVersion request event was compatible with the current version of the 
+	 *  Industry Analytics Kit. */
+	boolean compatible;
+}
+
+/** The Versioning Service allows you to request the current version of the 
+ *  Industry Analytics Kit, and to check that the version that you are requesting
+ *  is compatible with the application you are using. 
+ */
+monitor VersioningService {
+	
+	// NOTE: THESE VERSIONS ARE DYNAMICALLY ADDED DURING 
+	//       THE BUILD PROCESS FOR THE INDUSTRY ANALYTICS KIT
+	constant string CONST_CURRENT_VERSION := "2.1.0.0";
+	constant string CONST_MINIMUM_VERSION := "2.0.0.0";
+	
+	action onload() {
+	
+		monitor.subscribe( Constants.MANAGEMENT_CHANNEL);
+
+		on all CheckVersion() as version {
+			boolean valid := true;
+			
+			// If the version in the request is an empty string
+			// we just want to return the version.
+			if( version.version != "" ) then {				
+				// Convert the version strings to integer sequences
+				sequence<integer> currentVersion := convertStringToIntegerSequence( CONST_CURRENT_VERSION );
+				sequence<integer> minimumVersion := convertStringToIntegerSequence( CONST_MINIMUM_VERSION );
+				sequence<integer> requestVersion := convertStringToIntegerSequence( version.version );
+			
+				// Test the minimum version first
+				integer index := 0;
+				integer currVal;
+				for currVal in minimumVersion {
+					if( requestVersion[ index ] < currVal ) then {
+						valid := false;
+						break;
+					}
+					index := index + 1;
+				}
+				
+				// If the minimum condition was not met, log an error
+				if( not valid ) then {
+					log "The version provided ("+version.version+
+					    ") is not compatible with this version of the Industry Analytics Kit. Minimum supported version is "+
+						CONST_MINIMUM_VERSION at ERROR;
+				} else {
+					// Now test if the version provided is less than
+					// the current version (IE it's within the min->current range)
+					index := 0;
+					valid := false;
+				
+					for currVal in currentVersion {
+						if( requestVersion[ index ] < currVal ) then {
+							valid := true;
+							break;
+						}
+						index := index + 1;
+					}
+					// If the requested version was newer than the current
+					// version, it *may* be supported, but we do not know.
+					if( not valid ) then {
+						log "The version provided ("+version.version+
+						    ") may not be compatible with this version of the Industry Analytics Kit as it is newer. Current version is "+
+						CONST_CURRENT_VERSION at WARN;
+					}
+				}
+			}
+			
+			// Send the version information to the Analytics Management Channel
+			send CurrentVersion( CONST_CURRENT_VERSION, valid ) to Constants.MANAGEMENT_CHANNEL;
+		}
+	}
+	
+	/** 
+	 * This helper action checks a single stringified version number
+	 * against the stringified mininum version compatible and the current
+	 * version number.
+	 *
+	 * @private
+	 */
+	action convertStringToIntegerSequence( string strVersion ) returns sequence<integer> {
+		sequence<integer> seqVersion := [];
+		
+		// Convert the version strings to integer sequences 
+		string versionVal;
+		for versionVal in ".".split( strVersion ) {
+			if( integer.canParse( versionVal ) ) then {							
+				seqVersion.append( integer.parse( versionVal ) );
+			} else {
+				// Invalid version so break the loop
+				break;
+			}
+		}	
+		
+		return seqVersion;
+	}
+}

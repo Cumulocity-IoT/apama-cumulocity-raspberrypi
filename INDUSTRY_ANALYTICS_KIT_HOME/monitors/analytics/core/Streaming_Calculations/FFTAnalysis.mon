@@ -1,0 +1,510 @@
+//*****************************************************************************
+// Title: Analytic Template implementation
+//
+// Copyright (c) 2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.streaming_calculations;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Constants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+
+// Packages for the FFT calculations
+using com.industry.analytics.ComplexType;
+using com.industry.analytics.FFT;
+using com.industry.analytics.AmplitudeFrequency;
+
+// Packages for the Dataviews
+using com.industry.analytics.DataView;
+using com.apama.dataview.DataViewAddOrUpdateItem;
+
+/* @AnalyticDefinition
+{
+	"name": "FFT",
+	"description": "The metadata describing the new custom Analytic",
+	"group": "Streaming Calculations",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The incoming data"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Output",
+			"description": "The generated data"
+		}
+	],
+	"properties": [
+		{
+			"name": "timeWindow",
+			"description": "Defines the time window to calculate the FFT over",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0.0' }",
+			"postfix": "(Seconds)"
+		},{
+			"name": "sampleFrequency",
+			"description": "The sampling frequency (samples per-second) for the FFT calculation",
+			"type": "integer",
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0.0' }",
+		},{
+			"name": "peakCount",
+			"description": "The number of highest peak data to publish for each FFT calculation",
+			"type": "integer",
+			"optional": true,
+			"defaultValue": 3
+		},{
+			"name": "exposeDataview",
+			"description": "Creates a dataview for the FFT calculation data for analysis",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true
+		},{
+			"name": "dataviewName",
+			"description": "This parameter defines the name of the DataView where the incoming Data event data will be stored",
+			"type": "string",
+			"optional": true,
+			"defaultValue": "Input channel name",
+			"validator": "function(value) { return value.length > 0 || 'Name must not be blank' }"
+		},{
+			"name": "dataviewOwner",
+			"description": "The parameter defines the ownerId of the DataView ownerId that is created",
+			"type": "string",
+			"optional": true,
+			"defaultValue": "'*' = Any owner",
+			"validator": "function(value) { return value.length > 0 || 'Owner must not be blank' }",
+			"advanced":true
+		},{
+			"name": "bySourceId",
+			"description": "If defined, the FFT calculations are partitioned based on the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced":true
+		},{
+			"name": "managementId",
+			"description": "Defines the id used for management of the analytic",
+			"type": "string",
+			"optional": true,
+			"advanced": true
+		}
+	]
+}
+*/
+/**
+ *  The FFT Analytic performs a Fast Fourier Transformation calculation 
+ *  based on the incoming Data over the defined time window and sampling
+ *  frequency.  It then publishes a set of Data events for the (set of) 
+ *  highest peaks that in the results. The actual number of peaks to publish
+ *  is configurable. The frequency value is published in the dValue parameter, 
+ *  and the amplitude is published in the xValue parameter of the Data event.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>Defines the time window to calculate the FFT over</td>
+ *      <td>Stringified decimal <font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>True</td><td></td></tr>
+ *  <tr><td><b>sampleFrequency</b></td><td>Defines the number of samples per-second that the FFT is calculated on</td>
+ *      <td>Stringified integer <font face="courier" size="-1">>0</font></td><td>Integer</td><td>True</td><td></td></tr>
+ *  <tr><td><b>peakCount</b></td><td>Defines the number of highest amplitude peaks that will be published by the Analytic</td>
+ *      <td>Stringified integer <font face="courier" size="-1">>0</font></td><td>Integer</td><td>false</td><td><font face="courier" size="-1">3</font></td></tr>
+ *  <tr><td><b>exposeDataview</b></td><td>Defines whether or not a Dataview will be created holding all of the results from the FFT calculation.</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">false</font></td></tr>
+ *  <tr><td><b>dataviewName</b></td><td>The name of the DataView table where the incoming Data event data will be stored</td>
+ *      <td>A non-empty string</td><td>String</td><td>False</td><td>The input Data channel name</td></tr>
+ *  <tr><td><b>dataviewOwner</b></td><td>The identifier used as the owner of the DataView table that will be created. Defaults to access for all users</td>
+ *      <td>A non-empty string</td><td>String</td><td>False</td><td><font face="courier" size="-1">*</font></td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the FFT calculations are partitioned based on the <font face="courier" size="-1">sourceId</font> of the <font face="courier" size="-1">Data</font> events</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+// Define a FFT Analytic which takes Data events on the channel "Input1"  
+// and calculates the Fast Fourier Transformation over a 10 second time window
+// of 20 events per-second. It publishes a Data event for each of the top 3 highest
+// amplitude peaks (which is the default value) on the output channel "Output1".   
+send com.industry.analytics.Analytic("FFT", ["Input1"], ["Output1"], {"timeWindow":"10.0","sampleFrequency":"20.0"} ) to "";
+
+// Define a FFT Analytic which takes Data events on the channel "Input2"  
+// and calculates the Fast Fourier Transformation over a 10 second time window
+// of 20 events per-second. It publishes a Data event for each of the top 3 highest
+// amplitude peaks (which is the default value) on the output channel "Output2".
+// It also creates a new Apama Dataview that contains all of the FFT results
+// so that the user can visualise the results in Apama Dashboards or Mashzone
+send com.industry.analytics.Analytic("FFT", ["Input2"], ["Output2"], {"timeWindow":"10.0","sampleFrequency":"20.0","exposeDataview":"true"} ) to "";
+</code></dd>
+ *</dl>
+ */
+event FFTAnalysis {
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "FFT";
+	
+	/** This constant defines the configuration parameter name
+	 *  that specifies the time window to calculate the FFT 
+	 *  over */
+	constant string TIMEWINDOW := "timeWindow";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the sample frequency of the sample data  
+	 *  to calculate the FFT over */
+	constant string SAMPLE_FREQUENCY := "sampleFrequency";
+	/** This constant defines the configuration parameter name
+	 *  that specifies whether or not to create an Apama DataView
+	 *  for the calculated FFT values */
+	constant string EXPOSE_DATAVIEW := "exposeDataview";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the Average calculation will be
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the number of highest peaks to publish */
+	constant string PEAK_COUNT := "peakCount";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the name of the DataView to create */
+	constant string DATAVIEW_NAME := "dataviewName";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the ownerId of the DataView to create */
+	constant string DATAVIEW_OWNERID := "dataviewOwner";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+	/** Local cached output Data name. Used when sending Data events
+	 *  @private */
+	string _outputDataName;
+
+	/** The current data captured for the FFT calculation 
+	 *  @private */
+	dictionary<string/*sourceId*/, sequence<decimal>/*sequence of data*/ > _rawData;
+
+	/** The current number of samples captured for the FFT calculation.
+	 *  This is used to ensure that the FFT is only calculated for buckets of data
+	 *  @private */
+	dictionary<string/*sourceId*/, integer/*num of samples*/ > _sampleCounts;
+
+	/** Local cached Sampling frequency for the FFT calculation 
+	 *  @private */
+	integer _sampleFs;                    
+	/** Local cached time window for the FFT calculation 
+	 *  @private */
+	decimal _timeWindow;
+	/** The length of the sample data for the FFT calculation 
+	 *  @private */
+	integer _sampleLength;
+	/** Local cached Boolean indicating whether or not to create a Dataview for the FFT calculation 
+	 *  @private */
+	boolean _exposeDataview;       
+	/** Local cached number of highest peak values to publish
+	 *  @private */
+	integer _numPeaks;                    
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId;
+	/** Local cached output DataView name
+	 *  @private */
+	string _dataViewName;
+	/** Local cached output DataView name
+	 *  @private */
+	string _dataViewOwner;
+
+	/** DataView helper object for dataview that exposes the FFT calculation results.
+	 *  @private */
+	DataView _dvDatas;
+	
+	/** Boolean indicatiing whether or not the dataview was successfully created.
+	 *  @private */
+	boolean _dvCreated;
+	
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                                 to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		// Validate the Analytic instances configuration
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		// Create the new Analytic Object instance.
+		_analyticObject := new AnalyticObject;
+		_analyticObject.initExtended( config,         /* The original Analytic event that was used */ 
+		                              processData,    /* Optional action to process Data events that are received. In this case call the overridden processData() action */
+		                              new action<dictionary<string, Data> >,
+				                      false,
+		                              reset,          /* Optional action called when the Analytic instance is being reset */
+		                              onDelete,		  /* Optional action called when the Analytic instance is being deleted */
+		                              initComplete ); /* Callback action the implementation MUST call when the instance has been initialised */
+	}
+		
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns         A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		
+		boolean result := config.validateParams( NAME, /* The name of the Analytic */
+		                                         1, 1, /* The number of input and output Data channel names */
+		                                         [ TIMEWINDOW, SAMPLE_FREQUENCY, BY_SOURCEID, PEAK_COUNT,
+		                                           EXPOSE_DATAVIEW, DATAVIEW_NAME, DATAVIEW_OWNERID ], 
+		                                         [ Constants.DECIMAL, Constants.INTEGER, Constants.BOOLEAN, Constants.INTEGER, 
+		                                           Constants.BOOLEAN, Constants.STRING,  Constants.STRING ], 
+		  		                               	 [ true, true, false, false, false, false, false ] );
+
+		// If the initial set of parameter checks were valid
+		if( result ) then {
+
+			// Cache the output channel name, as may be used to publish Data events
+			_outputDataName := config.outputDataNames[0];
+
+			// Get the required values for the FFT
+			_timeWindow := config.getOrDecimal( TIMEWINDOW, 4.0d );
+			if( _timeWindow <= 0.0d ) then {
+				log "  Param "+TIMEWINDOW+" must be positive. Given value: " + _timeWindow.toString() at ERROR;
+				result := false;
+			}
+			
+			_sampleFs := config.getInteger( SAMPLE_FREQUENCY );
+			if( _sampleFs <= 0 ) then {
+				log "  Param "+SAMPLE_FREQUENCY+" must be a positive integer value. Given value: " + _sampleFs.toString() at ERROR;
+				result := false;
+			}
+			
+			// Only process the remaining options if the mandatory params were valid
+			if( result ) then {
+				// Calculate the number of samples
+				_sampleLength := ( _sampleFs.toDecimal() * _timeWindow ).round();
+				
+				// Get the optional parameter values
+				_bySourceId     := config.getOrBoolean( BY_SOURCEID, true );
+				_exposeDataview := config.getOrBoolean( EXPOSE_DATAVIEW, false );
+				_numPeaks       := config.getOrInteger( PEAK_COUNT, 3 );
+				
+				// Create the dataview if required
+				if( _exposeDataview ) then {
+					
+					// Default to using the name of the input data channel 
+					// as the name of the DataView
+					_dataViewName := config.getOrString( DATAVIEW_NAME, config.inputDataNames[0] ).ltrim().rtrim();
+					if( _dataViewName.length() = 0 ) then {
+						log "Dataview name parameter cannot contain blank strings." at ERROR;
+						result := false;
+					}
+					// Get the ownerId and default to "all users" with a wildcard
+					_dataViewOwner := config.getOrString( DATAVIEW_OWNERID, "*" ).ltrim().rtrim();
+					if( _dataViewOwner.length() = 0 ) then {
+						log "Dataview ownerId parameter cannot contain blank strings." at ERROR;
+						result := false;
+					}
+			
+					sequence<string> keyFields := Data.getKeyFields();
+					keyFields.append("frequency"); 
+					
+					_dvDatas.init( _dataViewName,
+					               ["streamName", "sourceId", "frequency", "amplitude"],
+					               ["string", "string", "decimal", "decimal"],
+					               keyFields,
+					               false,
+					               _dvDatasReady );
+				}
+			}
+		}
+		return result;
+	}
+	
+	/** 
+	 *  @private 
+	 */
+	action _dvDatasReady( boolean success ) {
+		_dvCreated := success;
+		if not _dvCreated then {
+			log "FFT DataView setup failed." at ERROR;
+		}
+	}
+	
+	/**
+	 *  This action implements the Analytic Data event processing. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		// Add the data to the cache
+		_rawData.getOrAddDefault( sourceId ).append( dataIn.dValue );	
+		integer rawDataSize := _rawData[ sourceId ].size();
+
+		// Check if we have enough data to perform the calculation
+		if( rawDataSize >= _sampleLength ) then {
+				
+			// Get and increment the current sample count
+			integer currSampleCount := _sampleCounts.getOrAddDefault( sourceId ) + 1;
+
+			
+			// Check if we exceeded the buffersize, and should remove oldest data
+			if( rawDataSize > _sampleLength ) then {
+				_rawData[ sourceId ].remove(0);
+			}
+
+			if( currSampleCount < _sampleLength ) then {
+				// Store the pre-incremented sample count
+				_sampleCounts[ sourceId ] := currSampleCount;
+			} else {
+				// Clear the sample count
+				_sampleCounts[ sourceId ] := 0;
+	
+				// Calculate the FFT over the complex numbers
+				sequence<ComplexType> fftResults := FFT.fft( _rawData[ sourceId ] );
+	
+				if( _numPeaks > 0 ) then {
+					// Calculate the magnitude/amplitude values
+					sequence<AmplitudeFrequency> topPeaks := FFT.getTopNAmplitudesAndFrequencies( _sampleFs, fftResults, _numPeaks );
+					
+					// Iterate over the results and publish the Data events
+					AmplitudeFrequency currVal;
+					for currVal in topPeaks {
+						// Create the Data event to publish
+						Data dataOut := dataIn.clone();
+						dataOut.streamName := _outputDataName;
+						dataOut.type       := DataConstants.COMPUTED;
+						dataOut.dValue     := currVal.frequency.toDecimal();
+						dataOut.xValue     := currVal.amplitude.toFloat();
+					
+						// Send the data event
+						_analyticObject.sendData( dataOut );
+					}	
+				}
+				
+				// If we want to publish the results of the FFT to a Dataview
+				if( _dvCreated ) then {
+					// Calculate the magnitude/amplitude values
+					sequence<AmplitudeFrequency> afResults := FFT.getAmplitudesAndFrequencies( _sampleFs, fftResults );
+			
+					integer lastFrequency    := 0;
+					decimal highestAmplitude := decimal.INFINITY;
+					
+					// Iterate over the results
+					AmplitudeFrequency currVal;
+					for currVal in afResults {
+						if( currVal.frequency != lastFrequency ) then {
+							lastFrequency    := currVal.frequency;
+							highestAmplitude := currVal.amplitude;
+						} else if( currVal.amplitude <= highestAmplitude ) then {
+							continue; // Skip this entry
+						}
+						
+						// Construct the dataview item
+						com.apama.dataview.DataViewAddOrUpdateItem item := new com.apama.dataview.DataViewAddOrUpdateItem;
+						item.dvName      := _dataViewName;
+						item.owner       := _dataViewOwner;
+						item.timeStamp   := dataIn.timestamp.toFloat();
+						item.fieldValues := [ dataIn.streamName, sourceId,
+						                      currVal.frequency.toString(),
+						                      currVal.amplitude.toString() ];
+						
+						// Add the item to the dataview
+						_dvDatas.add( item );
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 *  Optional action to reset the state of the Analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 */
+	action reset() {
+		// Clear the old raw data values
+		_rawData.clear();
+		_sampleCounts.clear();
+		
+		// Clear any dataview data
+		if _dvCreated then {
+			_dvDatas.clear();
+		}
+	}
+	
+
+	/**
+	 *  Action to clear up when an Analytic instance is deleted. The entry
+	 *  in the DataViewer list table is deleted and the Data events table for this
+	 *  instance is deleted.
+	 *
+	 *  @private
+	 */
+	action onDelete() {
+		// Clear the old raw data values
+		_rawData.clear();
+		_sampleCounts.clear();
+
+		// Delete any dataviews
+		if _dvCreated then {
+			_dvDatas.delete();
+		}
+	}
+}

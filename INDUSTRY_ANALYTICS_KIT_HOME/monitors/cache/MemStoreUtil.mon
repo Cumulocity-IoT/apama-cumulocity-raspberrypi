@@ -1,0 +1,544 @@
+// Title:         MemStoreUtil
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.exceptions.Exception;
+
+using com.apama.memorystore.Finished;
+using com.apama.memorystore.Iterator;
+using com.apama.memorystore.Row;
+using com.apama.memorystore.Schema;
+using com.apama.memorystore.Store;
+using com.apama.memorystore.Storage;
+using com.apama.memorystore.Table;
+
+/** @private */
+event TableProxy 
+{
+	Table _table;
+	boolean _valid;
+	
+	action getTable() returns Table {return _table;}
+	action isValid() returns boolean {return _valid;}
+}
+
+/** @private */
+event SchemaProxy
+{
+	Schema _schema;
+	boolean _valid;
+
+	action getFields() returns sequence<string> {return _schema.fields;}
+	action getSchema() returns Schema {return _schema;}
+	action getTypes() returns sequence<string> {return _schema.types;}
+	action isValid() returns boolean {return _valid;}
+}
+
+/** @private */
+event StoreProxy 
+{
+	Store _store;
+	boolean _valid;
+	
+	action getStore() returns Store {return _store;}
+	action isValid() returns boolean {return _valid;}
+}
+
+
+/**
+ * Indicates that a table is ready
+ * @private
+ */
+event TableReady
+{
+	string storeName;
+	string tableName;
+}
+
+
+/**
+ * MemStoreUtil - Provides convenience methods for managing a MemoryStore cache
+ * @private 
+ */
+event MemStoreUtil
+{
+	constant string IN_MEMORY := "IN_MEMORY";
+	constant string DISTRIBUTED := "DISTRIBUTED";
+	constant string CORRELATOR_PERSISTENT := "CORRELATOR_PERSISTENT";
+	
+	dictionary<string, StoreProxy> _stores;
+	dictionary<string, TableProxy> _tables;
+	dictionary<string, SchemaProxy> _schemas;
+	com.apama.memorystore.Schema _schema;
+
+
+	// initCache - Creates a MemoryStore Store object using the name parameter
+	// The Store is returned asynchronously via the callback function setStore
+	action initCache(string name,
+	                 string cacheType,
+	                 action<boolean> ready)
+	{
+		log "Initializing " + cacheType + " cache." at DEBUG;
+		Storage factory := new Storage;
+		Store store;
+		if factory.hasStore(name) then
+		{
+			log "Store " + name + " already exists." at DEBUG;
+			store := factory.open(name);
+			addStore(store);
+			ready(true);
+		}
+		else
+		{
+			integer reqId;
+			if cacheType = IN_MEMORY then
+			{
+				reqId := factory.prepareInMemory(name);
+			}
+			else if cacheType = DISTRIBUTED then
+			{
+				reqId := factory.prepareDistributed(name);
+			}
+			else if cacheType = CORRELATOR_PERSISTENT then
+			{
+				reqId := factory.prepareCorrelatorPersistent(name);
+			}
+			else
+			{
+				log "Unrecognised cache type: " + cacheType at ERROR;
+				ready(false);
+				return;
+			}
+			log "Prepare " + cacheType + " store reqId: " + reqId.toString() at DEBUG;
+
+			Finished f;
+			on Finished(id=reqId) :f
+			{
+				log "Received " + cacheType + " Finished: " + f.toString() at DEBUG; 
+				if not f.success then
+				{
+					log "Unable to create MemoryStore cache: " + f.toString() at ERROR;
+					ready(false);
+					return;
+				}
+				else
+				{
+					store := factory.open(name);
+					addStore(store);
+					ready(true);
+				}
+			}
+		}
+		log cacheType + " cache initialized." at INFO;
+	}
+	
+	
+	// openTable - Creates a MemoryStore Table object using the name parameter
+	//			   as well as the columns defined by the fields and types sequences
+	action openTable(string storeName,
+	                 string tableName,
+	                 sequence<string> fields, 
+	                 sequence<string> types,
+	                 boolean exposeMem,
+	                 boolean exposePersisted,
+	                 action<boolean, string, string> tableReady,
+	                 string memoryViewDisplayName,
+	                 string memoryViewDescription,
+	                 string persistentViewDisplayName,
+	                 string persistentViewDescription)
+	{
+		com.apama.memorystore.Table t;
+		StoreProxy sp := getStore(storeName);
+		if sp.isValid() and sp.getStore().hasTable(tableName) then
+		{
+			t := sp.getStore().open(tableName);
+			addTable(t);
+			addSchema(tableName, _schema);
+			tableReady(true, storeName, tableName);
+		}
+		else
+		{
+			Schema schema := Schema(fields,
+			                        types,
+			                        exposeMem,
+			                        exposePersisted,
+			                        memoryViewDisplayName,
+			                        memoryViewDescription,
+			                        persistentViewDisplayName,
+			                        persistentViewDescription);
+			integer reqID := sp.getStore().prepare(tableName, schema);
+			Finished f;
+			on Finished(id=reqID) :f
+			{
+				if not f.success then
+				{
+					log "Unable to create Table '" + tableName +
+						"' in store " + storeName +
+						": " + f.toString() at ERROR;
+					tableReady(false, storeName, tableName);
+					return;
+				}
+				else
+				{
+					t := sp.getStore().open(tableName);
+					addTable(t);
+					addSchema(tableName, schema);
+					tableReady(true, storeName, tableName);
+				}
+			}
+		}
+	}
+
+
+	// Retrieves the Table corresponding to the given Name and retrieves the Row with the given key.
+	action getRow(string tableName, string key) returns Row
+	{
+		Row row := new Row;
+		TableProxy t := getTable(tableName);
+		if t.isValid() then
+		{
+			row := t.getTable().get(key);
+		}
+		else
+		{
+			log "Invalid table: " + tableName at ERROR;
+		}
+		return row;
+	}
+
+
+	// Return true if the Table corresponding to the given Name has the given key.
+	action hasRow(string tableName, string key) returns boolean
+	{
+		TableProxy t := getTable(tableName);
+		if t.isValid() then
+		{
+			return t.getTable().hasKey(key);
+		}
+		else
+		{
+			log "Invalid table: " + tableName at ERROR;
+			return false;
+		}
+	}
+
+
+	// Retrieves the Table corresponding to the given Name and retrieves the Row with the given key.
+	action removeRow(string tableName, string key)
+	{
+		Row row := new Row;
+		TableProxy t := getTable(tableName);
+		if t.isValid() then
+		{
+			boolean result := t._table.hasKey(key);
+			if result then
+			{
+				t._table.remove(key);
+			}
+			else
+			{
+				log "Row not found for table " + tableName + ", key " + key at DEBUG;
+			}
+		}
+		else
+		{
+			log "Invalid table: " + tableName at ERROR;
+		}
+	}
+
+
+	action setRowValue(Row row, 
+	                   string field,
+	                   string type,
+	                   string value)
+	{
+		if type = Constants.BOOLEAN then
+		{
+			row.setBoolean(field, value.toBoolean());
+		}
+		else if type = Constants.INTEGER then
+		{
+			row.setInteger(field, value.toInteger());
+		}
+		else if type = Constants.DECIMAL then
+		{
+			row.setDecimal(field, value.toDecimal());
+		}
+		else if type = Constants.FLOAT then
+		{
+			row.setFloat(field, value.toFloat());
+		}
+		else if type = Constants.STRING then
+		{
+			row.setString(field, value);
+		}
+		else
+		{
+			log "Unsupported type " + type + " for field " + field + " and value " + value at ERROR;
+		}
+	}
+	
+	
+	// populateRow - Fills and returns a Row using the provided field names, types and values sequences
+	action populateRow(Row row,
+	                   sequence<string> fields,
+	                   sequence<string> types,
+	                   sequence<string> values) returns Row 
+	{
+		integer index := 0;
+		string field;
+		for field in fields
+		{
+			setRowValue(row, field, types[index], values[index]);
+			index := index + 1;
+		}
+		return row;
+	}
+
+
+	// forceCommit - commit the updated/new Row.  If the commit fails, fetch the row , reapply the changes and try again
+	action forceCommit(Row r )
+	{
+		integer collisions := 0;
+		while not r.tryCommit()
+		{
+			Row mine := r.clone();
+			r.update();
+			printOldVersusNewRow(r, mine);
+			r.copy(mine);
+			collisions := collisions + 1;
+			if collisions > 5 then
+			{
+				log "Too many optimistic collisions. Aborting forceCommit of " + r.getKey() at WARN;
+				break;
+			}
+		}
+		if collisions > 0 then
+		{
+			log collisions.toString() + " optimistic collision(s) committing row with key: " + r.getKey() at INFO; 
+		}
+	}
+
+
+	// First argument is an action that returns the name of the table. The second argument is an action that returns the row to be committed from the table.
+	action populateRowAndCommit(string tableName,
+	                            action<Table> returns Row getRow)
+	{
+		TableProxy tableProxy := new TableProxy;
+		tableProxy := getTable(tableName);
+		if tableProxy.isValid() then
+		{
+			forceCommit(getRow(tableProxy.getTable()));
+		}
+		else
+		{
+			log "Populate and commit row: table '" + tableName + "' not valid." at ERROR;
+		}
+	}
+
+
+	action printOldVersusNewRow(Row oldRow, Row newRow)
+	{
+		SchemaProxy sp := getSchema(oldRow.getTableName());
+		if sp.isValid() then
+		{
+			_printOldNewRow(oldRow, newRow, sp.getFields(), sp.getTypes());
+		}
+		else
+		{
+			log "Invalid schema for row: " + oldRow.getTableName() at ERROR;
+		}
+	}
+
+	
+	action _printOldNewRow(Row oldRow,
+	                       Row newRow,
+	                       sequence<string> fields,
+	                       sequence<string> types)
+	{
+		string field;
+		integer index := 0;
+		for field in fields
+		{
+			log "Field: " + field +
+				": old=" + getAsString(oldRow, field, types[index]) +
+				" new=" + getAsString(newRow, field, types[index]) at INFO;
+			index := index + 1;
+		}
+	}
+	
+	
+	action getAsString(Row row, string field, string type) returns string
+	{
+		if type = Constants.BOOLEAN then
+		{
+			return row.getBoolean(field).toString();
+		}
+		else if type = Constants.INTEGER then
+		{
+			return row.getInteger(field).toString();
+		}
+		else if type = Constants.DECIMAL then
+		{
+			return row.getDecimal(field).toString();
+		}
+		else if type = Constants.FLOAT then
+		{
+			return row.getFloat(field).toString();
+		}
+		else if type = Constants.STRING then
+		{
+			return row.getString(field);
+		}
+		else
+		{
+			log "Field type '" + type + "' not currently supported within MemoryStore." at ERROR;
+			return "";
+		}
+	}
+
+
+	// Retrieve the field from the given Row in string form
+	action getString(Row row, string field) returns string
+	{
+		return row.getString(field);
+	}
+
+
+	// Retrieve the field from the given Row in decimal form
+	action getDecimal(Row row, string field) returns decimal
+	{
+		return row.getDecimal(field);
+	}
+
+
+	// Retrieve the field from the given Row in float form
+	action getFloat(Row row, string field) returns float
+	{
+		return row.getFloat(field);
+	}
+
+
+	action getBoolean(Row row, string field) returns boolean
+	{
+		return row.getBoolean(field);
+	}
+
+
+	// Create TableProxy from the given Table and store in the dictionary of TableProxy instances
+	action addTable(Table t)
+	{
+		log "Adding table: " + t.getTableName() + " to TableProxy." at INFO;
+		_tables[t.getTableName()] := TableProxy(t, true);
+	}
+
+
+	// Retrieve TableProxy from dictionary of TableProxy instances
+	action getTable(string tableName) returns TableProxy
+	{
+		TableProxy result := new TableProxy;
+		if _tables.hasKey(tableName) then
+		{
+			result := _tables[tableName];
+		}
+		else
+		{
+			log "Invalid table name: " + tableName + ". Valid names are: " + ", ".join(_tables.keys()) at ERROR;
+		}
+		return result;
+	}
+
+
+	// Retrieve the TableProxy with the given name then clear its underlying Table.
+	action clearTable(string name)
+	{
+		TableProxy t := new TableProxy;
+		t := getTable(name);
+		if t.isValid() then
+		{
+			t._table.clear();
+		}
+		else
+		{
+			log "Invalid table: " + name at ERROR;
+		}
+	}
+
+
+	// Create SchemaProxy from given Schema and store in dictionary of SchemaProxy instances
+	action addSchema(string name, Schema s)
+	{
+		_schemas.add(name, SchemaProxy(s, true));
+	}
+
+
+	// Get SchemaProxy from dictionary of SchemaProxy instances
+	action getSchema(string name) returns SchemaProxy
+	{
+		SchemaProxy result := new SchemaProxy;
+		if _schemas.hasKey(name) then
+		{
+			result := _schemas[name];
+		}
+		else
+		{
+			log "Invalid schema name. Valid names are: " + ", ".join(_schemas.keys()) at ERROR;
+		}
+		return result;
+	}
+
+
+	// Create StoreProxy from given Store and add to the dictionary of StoreProxy instances
+	action addStore(Store store)
+	{
+		_stores[store.getStoreName()] := StoreProxy(store, true);
+	}
+
+
+	// Get StoreProxy from dictionary of StoreProxy instances
+	action getStore(string name) returns StoreProxy
+	{
+		return _stores.getOrDefault(name);
+	}
+}
+
+/** 
+ *  This internal Monitor is used to automatically intern  
+ *  any string constants that are defined that are associated
+ *  with the MemoryStore Utilities object in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternMemStoreUtil {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := MemStoreUtil.IN_MEMORY.intern();
+		discard := MemStoreUtil.DISTRIBUTED.intern();
+		discard := MemStoreUtil.CORRELATOR_PERSISTENT.intern();
+		on all StayAlive() {}
+	}
+}

@@ -1,0 +1,590 @@
+//*****************************************************************************
+// Title: Suppressor Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+using com.apama.exceptions.Exception;
+
+/** @private */
+event SubstitutionHandler {
+	action<Data, string> outputHandler;
+	string paramName;
+	string valueOrField;
+	
+	static action create(action<Data, string> outputHandler, string valueOrField) returns action<Data, Data> {
+		SubstitutionHandler s := new SubstitutionHandler;
+		s.outputHandler := outputHandler;
+		s.valueOrField := valueOrField;
+		
+		if valueOrField.ltrim().rtrim().matches("\\$\\{.*\\}") {
+			string fieldName := valueOrField.ltrim().rtrim().substring(2, -1).ltrim();
+			if fieldName.toLower().find("param.") = 0 {
+				s.paramName := fieldName.substring("param.".length(), fieldName.length());
+				fieldName := "param";
+			} else {
+				fieldName := fieldName.toLower();
+			}
+			
+			dictionary<string, action<Data, Data> > handlers := {
+				"dvalue": s.handleDValue,
+				"svalue": s.handleSValue,
+				"xvalue": s.handleXValue,
+				"yvalue": s.handleYValue,
+				"zvalue": s.handleZValue,
+				"type": s.handleType,
+				"timestamp": s.handleTimestamp,
+				"param": s.handleParam
+			};
+			
+			if handlers.hasKey(fieldName) {
+				return handlers[fieldName];
+			} else {
+				log "Unexpected mapping value: " + valueOrField at ERROR;
+				integer exception := integer.parse("THROW");
+				return new action<Data, Data>;
+			}
+			
+		} else {
+			return s.handleSimple;
+		}
+	}
+	
+	action tryOrLogAndRethrow(action<Data, string> a, Data dataOut, string v) {
+		try {
+			a(dataOut, v);
+		} catch(Exception e) {
+			log "Unable to assign value: " + v + " is not the correct type" at ERROR;
+			integer exception := integer.parse("THROW");
+		}
+	}
+	
+	action handleDValue(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.dValue.toString());
+	}
+	action handleSValue(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.sValue);
+	}
+	action handleXValue(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.xValue.toString());
+	}
+	action handleYValue(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.yValue.toString());
+	}
+	action handleZValue(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.zValue.toString());
+	}
+	action handleType(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.type);
+	}
+	action handleTimestamp(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.timestamp.toString());
+	}
+	action handleParam(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, dataIn.params.getOrDefault(paramName));
+	}
+	action handleSimple(Data dataIn, Data dataOut) {
+		tryOrLogAndRethrow(outputHandler, dataOut, valueOrField);
+	}
+}
+
+/* @AnalyticDefinition
+{
+	"name": "Mapper",
+	"description": "Map a field to a different value.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Mapper.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to map"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Mapped",
+			"description": "Mapped data channel",
+			"dataProperties": ["+dValue", "+sValue", "+xValue", "+yValue", "+zValue", "+params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "inputField",
+			"description": "The input field to use in mapping.",
+			"type": "string",
+			"validValues": ["dValue", "sValue", "xValue", "yValue", "zValue", "type", "param"]
+		},{
+			"name": "outputField",
+			"description": "The output field to use in mapping.",
+			"type": "string",
+			"optional": "true",
+			"defaultValue": "Same as Input Field",
+			"validValues": ["dValue", "sValue", "xValue", "yValue", "zValue", "type", "param"]
+		},{
+			"name": "mapping",
+			"description": "A dictionary of stringified inputFieldValue to stringified outputFieldValue. (eg. {\"inputValue\":\"outputValue\", \"inputValue2\":\"2.0\"} )",
+			"type": "string"
+		},{
+			"name": "inputParamName",
+			"description": "The name of the input param (Required when Input Field is \"param\").",
+			"type": "string",
+			"optional": "true"
+		},{
+			"name": "outputParamName",
+			"description": "The name of the output param (Required when Output Field is \"param\").",
+			"type": "string",
+			"optional": "true"
+		},{
+			"name": "managementId",
+			"description": "Defines the id used for management of the analytic",
+			"type": "string",
+			"optional": true,
+			"advanced": true
+		}
+	]
+}
+*/
+/**
+ *  The Mapper Analytic will modify a field on each event in the input stream. 
+ * 
+ *  Events with an input field value matching a key in the mapping dictionary will have their output field value
+ *  set to the value in the mapping dictionary. If a "default" key is provided in the dictionary then any unmatched events will use this value.
+ * 
+ *  Events that do not match the mapping dictionary will be unaffected.
+ * 
+ *  Matching or setting a param value, requires the name of the param to be provided in "inputParamName" and/or "outputParamName".
+ *
+ *  In the "mapping" dictionary you can provide keys in any parseable representation (eg. "10", "10.0", "10.0d"), but there should not be duplicate keys
+ *
+ *  To avoid having to escape double quotes with backslashes in the "mapping" param, use a dictionary literal and call ".toString()" (see the Example Usage)
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.  All the
+ *      <font face="courier" size="-1">params</font> from the input Data are copied to the output Data events.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>inputField</b></td><td>Determines which Data field to match while mapping.</td>
+ *      <td><font face="courier" size="-1">dValue, sValue, xValue, yValue, zValue, type, param</font></td><td>string</td><td>true</td><td></td></tr>
+ *  <tr><td><b>outputField</b></td><td>Determines which Data field to modify while mapping.</td>
+ *      <td><font face="courier" size="-1">dValue, sValue, xValue, yValue, zValue, type, param</font></td><td>string</td><td>false</td><td>Same as inputField</td></tr>
+ *  <tr><td><b>mapping</b></td><td>The value to match (as the dictionary's key) on the incoming data and the resulting value (as the value) to set on the outgoing.</td>
+ *      <td>Note: Using the key <font face="courier" size="-1">default</font> will handle any unmatched events.</td><td>Stringified dictionary&ltstring,string&gt</td><td>true</td><td></td></tr>
+ *  <tr><td><b>inputParamName</b></td><td>If inputField="param", then this is the name of the param.</td>
+ *      <td></td><td>string</td><td>if inputField="param"</td><td></td></tr>
+ *  <tr><td><b>outputParamName</b></td><td>If outputField="param", then this is the name of the param.</td>
+ *      <td></td><td>string</td><td>if outputField="param"</td><td></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Mapper Analytic which takes Data events on the channel "Input1".
+// Any data events arriving on this channel with an dValue=1.0 or -1.0 have their sValue set to "up" or "down", otherwise the sValue is set to "unknown" 
+// and are sent to the output channel "Output1".
+send com.industry.analytics.Analytic("Mapper", ["Input1"], ["Output1"], { "inputField":"dValue","outputField":"sValue","mapping":{"1":"up", "-1.0d":"down", "default":"unknown"}.toString() } ) to "";
+
+// Define a Mapper Analytic which takes Data events on the channel "Input1".
+// Any data events arriving on this channel with a param "direction":"up" or "direction":"down" have their dValue set to 1.0 or -1.0, otherwise the dValue is set to 0.0 (using "default")
+// and are sent to the output channel "Output1".
+send com.industry.analytics.Analytic("Mapper", ["Input1"], ["Output1"], { "inputField":"param","inputParamName":"direction","outputField":"dValue","mapping":{"up":"1", "down":"-1", "default":"0"}.toString() } ) to "";
+</code></dd>
+ *</dl>
+ */
+event Mapper
+{
+	/** The name of the analytic. */
+	constant string NAME := "Mapper";
+	
+	/** Constant for analytic configuration */
+	constant string INPUT_FIELD := "inputField";
+	/** Constant for analytic configuration */
+	constant string INPUT_PARAM_NAME := "inputParamName";
+	/** Constant for analytic configuration */
+	constant string OUTPUT_FIELD := "outputField";
+	/** Constant for analytic configuration */
+	constant string OUTPUT_PARAM_NAME := "outputParamName";
+	/** Constant for analytic configuration */
+	constant string MAPPING := "mapping";
+	/** Constant key mapping dictionary, used if no other keys match */
+	constant string DEFAULT := "default";
+	
+	/** @private */
+	string _outputStreamName;
+  
+	/** @private */
+	action<Data> returns string _inputHandler;
+	/** @private */
+	string _inputParamName;
+	/** @private */
+	string _outputParamName;
+	/** @private */
+	dictionary<string, action<Data, Data> > _mapping;
+
+	/** @private */
+	dictionary<string, action<Data> returns string> _inputHandlers;
+	/** @private */
+	dictionary<string, action<Data, string> > _outputHandlers;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init(Analytic config, action<boolean, AnalyticInterface> initComplete) {
+		_inputHandlers := {
+			Constants.DVALUE: inputHandlerDValue, 
+			Constants.SVALUE: inputHandlerSValue,
+			Constants.XVALUE: inputHandlerXValue,
+			Constants.YVALUE: inputHandlerYValue,
+			Constants.ZVALUE: inputHandlerZValue,
+			Constants.TYPE: inputHandlerType,
+			Constants.PARAM: inputHandlerParam
+		};
+		_outputHandlers := {
+			Constants.DVALUE: outputHandlerDValue, 
+			Constants.SVALUE: outputHandlerSValue,
+			Constants.XVALUE: outputHandlerXValue,
+			Constants.YVALUE: outputHandlerYValue,
+			Constants.ZVALUE: outputHandlerZValue,
+			Constants.TYPE: outputHandlerType,
+			Constants.PARAM: outputHandlerParam
+		};
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      new action<>,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration(Analytic config) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                       [ INPUT_FIELD, OUTPUT_FIELD, MAPPING, INPUT_PARAM_NAME, OUTPUT_PARAM_NAME ],
+		      		                           [ Constants.STRING,  Constants.STRING, Constants.STRING, Constants.STRING, Constants.STRING ],
+		      		                           [ true, false, true, false, false ] );
+		
+		// Only check the specific params if the validation was okay
+		if result {
+			_outputStreamName := config.outputDataNames[0];
+			
+			// Mandatory
+			string inputField := config.getString(INPUT_FIELD).ltrim().rtrim();
+			if inputField.length() = 0 {
+				log "  Param "+ INPUT_FIELD +" cannot be an empty string." at ERROR;
+				result := false;
+			} else {
+				inputField := inputField.toLower();
+				if _inputHandlers.hasKey(inputField) {
+					_inputHandler := _inputHandlers[inputField];
+				} else {
+					log "  Param "+ INPUT_FIELD +" must be one of " + _inputHandlers.keys().toString() at ERROR;
+					result := false;
+				}
+			}
+			
+			action<Data, string> outputHandler := new action<Data, string>;
+			string outputField := config.getOrString(OUTPUT_FIELD, inputField).ltrim().rtrim();
+			if outputField.length() = 0 {
+				log "  Param "+ OUTPUT_FIELD +" cannot be an empty string." at ERROR;
+				result := false;
+			} else {
+				outputField := outputField.toLower();
+				if _outputHandlers.hasKey(outputField) {
+					outputHandler := _outputHandlers[outputField];
+				} else {
+					log "  Param "+ OUTPUT_FIELD +" must be one of " + _outputHandlers.keys().toString() at ERROR;
+					result := false;
+				}
+			}
+			
+			_inputParamName := config.getString(INPUT_PARAM_NAME);
+			if inputField = "param" {
+				if _inputParamName.length() = 0 {
+					log "  Param "+ INPUT_PARAM_NAME +" should be provided when " + INPUT_FIELD + " is param." at ERROR;
+					result := false;
+				}
+			} else {
+				if _inputParamName.length() > 0 {
+					log "  Param "+ INPUT_PARAM_NAME +" should not be provided unless " + INPUT_FIELD + " is param." at ERROR;
+					result := false;
+				}
+			}
+			
+			_outputParamName := config.getString(OUTPUT_PARAM_NAME);
+			if outputField = "param" {
+				if _outputParamName.length() = 0 {
+					log "  Param "+ OUTPUT_PARAM_NAME +" should be provided when " + OUTPUT_FIELD + " is param." at ERROR;
+					result := false;
+				}
+			} else {
+				if _outputParamName.length() > 0 {
+					log "  Param "+ OUTPUT_PARAM_NAME + " should not be provided unless " + OUTPUT_FIELD + " is param." at ERROR;
+					result := false;
+				}
+			}
+			
+			string mappingString := config.getString(MAPPING);
+			if dictionary<string, string>.canParse(mappingString) {	
+				dictionary<string, string> mappingDict := dictionary<string, string>.parse(mappingString);
+				try {
+					mappingDict := tidyKeys(inputField, mappingDict);
+				} catch(Exception e) {
+					log "  Param " + MAPPING + " - Unable to parse all keys to their appropriate type" at ERROR;
+					result := false;
+				}
+				try {
+					_mapping := createSubstitutionHandlers(mappingDict, outputHandler);
+				} catch(Exception e) {
+					log "  Param " + MAPPING + " - Unable to parse all values containing '${}' substitutions" at ERROR;
+					result := false;
+				}
+				try {
+					checkValues(_mapping);
+				} catch (Exception e) {
+					log "  Param " + MAPPING + " - Unable to parse all values to their appropriate type" at ERROR;
+					result := false;
+				}
+				if _mapping.size() = 0 {
+					log "  Param "+ MAPPING + " should contain at least one mapping." at ERROR;
+					result := false;
+				}
+			} else {
+				log "  Param "+ MAPPING + " should be provided as a stringified dictionary<string, string>." at ERROR;
+				result := false;
+			}
+		}
+
+		return result;
+	}
+	
+	/** @private */
+	action createSubstitutionHandlers(dictionary<string, string> mappingDict, action<Data, string> outputHandler) returns dictionary<string, action<Data, Data> > {
+		dictionary<string, action<Data, Data> > result := new dictionary<string, action<Data, Data> >;
+		
+		string key;
+		for key in mappingDict.keys() {
+			string value := mappingDict[key];
+			result.add(key, SubstitutionHandler.create(outputHandler, value));
+		}
+		return result;
+	}
+	
+	/** @private */ 
+	action checkValues(dictionary<string, action<Data, Data> > mapping) {
+		action<Data, Data> value;
+		for value in mapping.values() {
+			// Throws if invalid
+			value(new Data, new Data);
+		}
+	}
+	
+	/** @private
+	*   Tidies all of the key in a map by parsing them to their respective type and then toString-ing them back	
+	*   This allows us to gracefully handle keys such as "10.0" and "10.0d", which become "10" when parsed and stringified
+	*/
+	action tidyKeys(string inputField, dictionary<string, string> inDict) returns dictionary<string, string> {
+		dictionary<string, string> outDict := new dictionary<string, string>;
+
+		dictionary<string, action<string> returns string> keyTidiers := {
+			Constants.DVALUE: decimalTidier, 
+			Constants.SVALUE: stringTidier,
+			Constants.XVALUE: floatTidier,
+			Constants.YVALUE: floatTidier,
+			Constants.ZVALUE: floatTidier,
+			Constants.TYPE: stringTidier,
+			Constants.PARAM: stringTidier
+		};
+		if not keyTidiers.hasKey(inputField) {
+			return inDict;
+		}
+		action<string> returns string keyTidier := keyTidiers[inputField];
+		
+		string key;
+		for key in inDict.keys() {
+			string value := inDict[key];
+			string newKey := key;
+			if key.ltrim().rtrim().toLower() = DEFAULT {
+				newKey := DEFAULT;
+			} else {
+				newKey := keyTidier(key);
+			}
+			if outDict.hasKey(newKey) {
+				log "  Param " + MAPPING + " contains duplicate key: " + key at ERROR;
+				return new dictionary<string, string>;
+			}
+			outDict[newKey] := value;
+		}
+		
+		return outDict;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData(Data dataIn) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		string inputFieldValue := _inputHandler(dataIn);
+
+		Data dataOut := dataIn.clone();
+		if dataOut.type = DataConstants.RAW {
+			dataOut.type := DataConstants.COMPUTED;
+		}
+		
+		try {
+			if _mapping.hasKey(inputFieldValue) {
+				_mapping[inputFieldValue](dataIn, dataOut);
+			} else if _mapping.hasKey(DEFAULT) {
+				_mapping[DEFAULT](dataIn, dataOut);
+			}
+		
+			dataOut.streamName := _outputStreamName;
+			_analyticObject.sendData(dataOut);
+		} catch(Exception e) {
+			log "Unable to map so output was skipped for incoming event: " + dataIn.toString() at ERROR;
+		}
+	}
+
+	/** @private */
+	action inputHandlerDValue(Data dataIn) returns string { return dataIn.dValue.toString(); }
+	/** @private */
+	action inputHandlerSValue(Data dataIn) returns string { return dataIn.sValue; }
+	/** @private */
+	action inputHandlerXValue(Data dataIn) returns string { return dataIn.xValue.toString(); }
+	/** @private */
+	action inputHandlerYValue(Data dataIn) returns string { return dataIn.yValue.toString(); }
+	/** @private */
+	action inputHandlerZValue(Data dataIn) returns string { return dataIn.zValue.toString(); }
+	/** @private */
+	action inputHandlerType(Data dataIn) returns string { return dataIn.type; }
+	/** @private */
+	action inputHandlerParam(Data dataIn) returns string { return dataIn.params.getOrDefault(_inputParamName); }
+
+	/** @private */
+	action outputHandlerDValue(Data dataOut, string value) { dataOut.dValue := decimal.parse(blankToZero(value)); }
+	/** @private */
+	action outputHandlerSValue(Data dataOut, string value) { dataOut.sValue := value; }
+	/** @private */
+	action outputHandlerXValue(Data dataOut, string value) { dataOut.xValue := float.parse(blankToZero(value)); }
+	/** @private */
+	action outputHandlerYValue(Data dataOut, string value) { dataOut.yValue := float.parse(blankToZero(value)); }
+	/** @private */
+	action outputHandlerZValue(Data dataOut, string value) { dataOut.zValue := float.parse(blankToZero(value)); }
+	/** @private */
+	action outputHandlerType(Data dataOut, string value) { dataOut.type := value; }
+	/** @private */
+	action outputHandlerParam(Data dataOut, string value) { dataOut.params.add(_outputParamName, value); }
+	
+	/** @private */
+	action blankToZero(string possiblyBlank) returns string {
+		if possiblyBlank = "" {
+			return "0";
+		} else {
+			return possiblyBlank;
+		}
+	}
+
+	/** @private */
+	action decimalTidier(string value) returns string { return decimal.parse(value).toString(); }
+	/** @private */
+	action stringTidier(string value) returns string { return value; }
+	/** @private */
+	action floatTidier(string value) returns string { return float.parse(value).toString(); }
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Suppressor Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternMapper {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Mapper.NAME.intern();
+		discard := Mapper.INPUT_FIELD.intern();
+		discard := Mapper.OUTPUT_FIELD.intern();
+		discard := Mapper.INPUT_PARAM_NAME.intern();
+		discard := Mapper.OUTPUT_PARAM_NAME.intern();
+		discard := Mapper.MAPPING.intern();
+		
+		on all StayAlive() {}
+	}
+}

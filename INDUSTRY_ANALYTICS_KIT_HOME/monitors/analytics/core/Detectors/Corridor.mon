@@ -1,0 +1,462 @@
+//*****************************************************************************
+// Title: Corridor implementation with Upper and Lower limits
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.detectors;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/** 
+*  This event object is a cache of the Corridor 
+*  data used in the Analytic.  This is only used for 
+*  internal purposes, and is not exposed to the Users 
+*  application.
+*  
+*  @private
+*/
+event CorridorData
+{
+	decimal lastValue;
+	decimal lastTimestamp;
+	decimal duration;
+	integer repeats;
+}
+
+/* @AnalyticDefinition
+{
+	"name": "Corridor",
+	"description": "Detect data outside of a defined corridor.",
+	"group": "Detectors",
+	"documentation": "com/industry/analytics/detectors/Corridor.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to check",
+			"dataProperties": ["dValue"]
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Breach",
+			"description": "The channel on which to output anomalies",
+			"dataProperties": ["+params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "upperThreshold",
+			"description": "Defines the upper threshold value that is used to detect breaches",
+			"type": "decimal"
+		},{
+			"name": "lowerThreshold",
+			"description": "Defines the lower threshold value that is used to detect breaches",
+			"type": "decimal"
+		},{
+			"name": "zone",
+			"description": "Defines whether to check for data inside or outside the corridor",
+			"type": "string",
+			"validValues": ["inside", "outside"]
+		},{
+			"name": "duration",
+			"description": "Defines how long (in seconds) the threshold may be breached before an Anomaly Data is generated. If the value is 0.0d then the Anomaly Data is generated immediately.",
+			"type": "decimal",
+			"optional": true,
+			"defaultValue": 0,
+			"validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0' }",
+			"postfix": "(Seconds)"
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+*  The Corridor Analytic generates an anomaly Data if a 
+*  threshold range is breached. The computation looks for data entering or exiting the corridor. 
+*  These can either be reported immediately or, to 
+*  ignore spikes, after a set duration based on the Data timestamps.
+*
+*  <dl><dt><b>Input Data events:</b></dt>
+*  <dd>Only one input Data stream names must be provided.</dd>
+*  <dd>The stream will always provide the data to be compared to the threshold and is mandatory.</dd>
+*  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+*  </dl>
+*  <dl><dt><b>Output Data events:</b></dt>
+*  <dd>Only a single output Data stream name must be provided. Only Data events of Anomaly type are generated.  All the
+*      <font face="courier" size="-1">params</font> from the breaching input Data are copied to the anomaly Data.</dd>
+*  </dl>
+*  <dl><dt><b>Params:</b></dt>
+*  <dd>
+*  <table border="1" style="border-collapse: collapse;width:100%">
+*  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+*  <tr><td><b>upperThreshold</b></td><td>Defines the upper threshold value that is used to detect breaches</td>
+*      <td>Stringified decimal</td><td>Decimal</td><td>True</td><td><font face="courier" size="-1">0.0d</font></td></tr>
+*  <tr><td><b>lowerThreshold</b></td><td>Defines the lower threshold value that is used to detect breaches</td>
+*      <td>Stringified decimal</td><td>Decimal</td><td>True</td><td><font face="courier" size="-1">0.0d</font></td></tr>
+*  <tr><td><b>zone</b></td><td>Defines whether to check for data inside or outside the corridor</td>
+*      <td><font face="courier" size="-1">"inside"</font>, <font face="courier" size="-1">"outside"</font>. <b>Note:</b> These values are case-insensitive</td>
+*      <td>String</td><td>True</td><td></td></tr>
+*  <tr><td><b>duration</b></td><td>Defines how long (in seconds) the threshold may be breached before an 
+*                                  Anomaly Data is generated. If a value of <font face="courier" size="-1"><=0.0d</font> is defined,
+*                                  the Anomaly Data is generated immediately.</td>
+*      <td>Stringified Decimal <font face="courier" size="-1">>= 0.0d</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">0.0d</font></td></tr>
+*  </table></dd>
+*  </dl>
+*  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+// Define a threshold Corridor for Data events on the channel "Input1"
+// and generate an anomaly Data event on the channel "Output1" if the
+// value is outside the range 10 to 30
+send com.industry.analytics.Analytic("Corridor", ["Input1"], ["Output1"], {"lowerThreshold":"10","upperThreshold":"30", "zone":"outside"} ) to "";
+  
+// Define a threshold Corridor for Data events on the channel "Input2"
+// and generate an anomaly Data event on the channel "Output2" if the 
+// value is goes inside the range 10 to 30
+send com.industry.analytics.Analytic("Corridor", ["Input2"], ["Output2"], {"lowerThreshold":"10","upperThreshold":"30", "zone":"inside"} ) to "";
+</code></dd>
+*  </dl>
+*/
+event Corridor
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Corridor";
+	
+	/** This constant defines the configuration parameter name that
+	 *  specifies the zone of the threshold check */
+	constant string ZONE := "zone";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the duration the threshold can be breached before an
+	 *  Anomaly data event is generated. */
+	constant string DURATION := "duration";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the upper threshold value to check for. */
+	constant string UPPER_THRESHOLD := "upperThreshold";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the lower threshold value to check for. */
+	constant string LOWER_THRESHOLD := "lowerThreshold";
+	/** This constant defines the value for setting the 
+	 *  <font face="courier" size="-1">"zone"</font> configuration parameter to 
+	 *  use exiting the threshold corridor check. */
+	constant string OUTSIDE := "outside";
+	/** This constant defines the value for setting the 
+	 *  <font face="courier" size="-1">"zone"</font> configuration parameter to 
+	 *  use entering the threshold corridor check. */
+	constant string INSIDE := "inside";
+	
+	// State
+	/** Local cached dictionary of the threshold breach values, keyed by
+	 *  the sourceId.
+	 *  @private */	
+	dictionary<string /*sourceId*/, CorridorData> _breaches;
+	/** Dictionary of the last data values. Needed when the thresholds are changed.
+	 *  @private */
+	dictionary<string /*sourceId*/, Data> _lastDataValues;
+	/** Local cached value for the position of data value wrt corridor
+	 *  @private */
+	dictionary<string /*sourceId*/, string> _position;
+	
+	// Algo specific variables
+	/** Local cached input Data names
+	 *  @private */
+	string _inputDataName;
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	
+	/** Local cached value for the zone configuration parameter value
+	 *  @private */
+	string _zoneParam;
+	/** Local cached value for the duration configuration parameter value
+	 *  @private */
+	decimal _duration;
+	/** Local cached value for the upper threshold configuration parameter value
+	 *  @private */
+	decimal _upperThreshold;
+	/** Local cached value for the lower threshold configuration parameter value
+	 *  @private */
+	decimal _lowerThreshold;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+    *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration(Analytic config) returns boolean
+	{
+		boolean result := config.validateParams( NAME, 1, 1, 
+		      		                             [ ZONE,              DURATION, 
+		    		                               UPPER_THRESHOLD,   LOWER_THRESHOLD ],
+		    		                             [ Constants.STRING,  Constants.DECIMAL,
+  		    		                               Constants.DECIMAL, Constants.DECIMAL ],
+		    		                             [ true,              false,
+		    		                               true,              true ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_inputDataName  := config.inputDataNames[0];
+			_outputDataName := config.outputDataNames[0];
+
+			// Convert the returned value to lower-case for better matching
+			_zoneParam := config.getString( ZONE ).toLower().ltrim().rtrim();
+
+			if( not (_zoneParam = OUTSIDE or _zoneParam = INSIDE ) ) then { 			
+				log "  Param zone must be inside or outside. Given value: " + _zoneParam at ERROR;
+				result := false;
+			}
+		
+			if( config.hasParam( UPPER_THRESHOLD ) ) then {
+				_upperThreshold := config.getDecimal( UPPER_THRESHOLD );
+			} else {
+				log "Upper threshold value must be specified." at ERROR;
+				result := false;
+			}
+			
+			if( config.hasParam( LOWER_THRESHOLD ) ) then {
+				_lowerThreshold := config.getDecimal( LOWER_THRESHOLD );
+			} else {
+				log "Lower threshold value must be specified." at ERROR;
+				result := false;
+			}
+			
+			// if both upper and lower are defined,  make sure upper is greater than lower
+			if( result and ( _upperThreshold < _lowerThreshold ) ) then {
+				log "Lower threshold value must be less than Upper Threshold " at ERROR;
+				result := false;
+			}
+			// <= 0 treated as single point breach notified.
+			_duration := config.getOrDecimal( DURATION, 0.0d );
+		}
+
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		// Check whether an existing breach exists.
+		// If _breaches has an sourceId, _zone should too.
+		if _breaches.hasKey(dataIn.sourceId) then
+		{
+			// Reset
+			if (_position[dataIn.sourceId] = OUTSIDE and (dataIn.dValue <= _upperThreshold and dataIn.dValue >= _lowerThreshold)) or
+					(_position[dataIn.sourceId] = INSIDE and (dataIn.dValue > _upperThreshold or dataIn.dValue < _lowerThreshold)) then
+			{
+				_breaches.remove(dataIn.sourceId);
+			}
+			else // update breach details
+			{
+				CorridorData breach := _breaches[dataIn.sourceId];
+				breach.lastValue := dataIn.dValue;
+				breach.duration := breach.duration + (dataIn.timestamp - breach.lastTimestamp);
+				breach.lastTimestamp := dataIn.timestamp;
+				if breach.duration >= _duration * (breach.repeats + 1).toDecimal() then
+				{
+					_sendBreach(dataIn);
+					breach.repeats := breach.repeats + 1;
+				}
+			}
+			return;
+		}
+		
+		//No pre-existing breach		
+		if(_zoneParam = OUTSIDE ) then
+		{
+			if dataIn.dValue > _upperThreshold or dataIn.dValue < _lowerThreshold then 
+			{
+				_position[dataIn.sourceId] := OUTSIDE;
+				_createThresholdData(dataIn);
+			} else 
+			{
+				_position[dataIn.sourceId] := INSIDE;
+			}
+
+		}
+		else if (_zoneParam = INSIDE) then
+		{
+			if dataIn.dValue <= _upperThreshold and dataIn.dValue >= _lowerThreshold then 
+			{
+				_position[dataIn.sourceId] := INSIDE;
+				_createThresholdData(dataIn);
+			} else
+			{
+				_position[dataIn.sourceId] := OUTSIDE;
+			}
+			
+		} 
+		
+	}
+	
+	/**
+ 	 *  This action is called internally and should not be called
+ 	 *  directly by the Users application.
+	 *
+	 *  @private
+	 */	
+	action _sendBreach(Data dataIn)
+	{
+		Data dataOut := dataIn.clone();
+		dataOut.streamName := _outputDataName;
+		dataOut.type       := DataConstants.ANOMALY;
+		dataOut.params[Constants.ANOMALY_SOURCE] := NAME;
+		dataOut.params[DURATION] := _breaches[dataIn.sourceId].duration.toString();
+		if _zoneParam = OUTSIDE and (dataIn.dValue > _upperThreshold or dataIn.dValue < _lowerThreshold) then 
+		{
+			dataOut.params[ZONE] := OUTSIDE;
+		} else if _zoneParam = INSIDE and (dataIn.dValue <= _upperThreshold and dataIn.dValue >= _lowerThreshold) then
+		{
+			dataOut.params[ZONE] := INSIDE;
+		} 
+		
+		_analyticObject.sendData(dataOut);
+	}
+	
+	/**
+	 *  This action is called internally and should not be called
+	 *  directly by the Users application.
+	 *
+	 *  @private
+	 */	
+	action _createThresholdData(Data dataIn)
+	{
+		CorridorData breach := new CorridorData;
+		breach.lastValue := dataIn.dValue;
+		breach.lastTimestamp := dataIn.timestamp;
+		breach.duration := 0.0d;
+		breach.repeats := 0;
+		_breaches[dataIn.sourceId] := breach;
+		if _duration <= 0.0d then
+		{
+			// Send an immediate notification
+			_sendBreach(dataIn);
+			breach.repeats := 1;
+			_breaches.remove(dataIn.sourceId);
+		}
+	}
+	
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset()
+	{
+		_breaches.clear();
+		_lastDataValues.clear();
+		_position.clear();
+	}
+}
+
+
+/** 
+*  This internal Monitor is used to automatically intern 
+*  any string constants that are defined that are associated
+*  with the Threshold Analytic in order to improve  
+*  performance when handling strings.
+*
+*  Note: The listener that is created is required in order
+*        to keep the monitor alive between a Persistant  
+*        Correlators recovery.  Otherwise, this would be a 
+*        transient monitor, and it would not be recovered.  
+*        Which would then mean that the strings would not
+*        interned in the recovered Correlator.
+*
+*  @private
+*/
+monitor InternCorridor {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Corridor.NAME.intern();
+		discard := Corridor.ZONE.intern();
+		discard := Corridor.DURATION.intern();
+		discard := Corridor.UPPER_THRESHOLD.intern();
+		discard := Corridor.LOWER_THRESHOLD.intern();
+		discard := Corridor.OUTSIDE.intern();
+		discard := Corridor.INSIDE.intern();
+		on all StayAlive() {}
+	}
+}
+

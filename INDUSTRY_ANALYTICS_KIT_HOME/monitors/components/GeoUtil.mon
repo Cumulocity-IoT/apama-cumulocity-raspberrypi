@@ -1,0 +1,89 @@
+//*****************************************************************************
+// Title:         GeoLocation
+//
+// Copyright (c) 2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+/**
+ *  This event provides common geolocation calculations and
+ *  constant values. 
+ */
+event GeoUtil {
+	/**Constant to save the value of Earth's radius in KMS
+	 * @private
+	 */
+	constant decimal EARTH_RADIUS_KMS := 6371.0d;
+	
+	/**Constant to save the value of Earth's radius in MILES
+	 * @private
+	 */
+	constant decimal EARTH_RADIUS_MILES := 3959.0d;
+	
+	/**
+	 * This action implements the Haversine calculation to determine the distance (in kilometres) 
+	 * between two GPS coordinates.
+	 * 
+	 * @param lat1  The latitude coordinate of the first location
+	 * @param lon1  The longitude coordinate of the first location
+	 * @param lat2  The latitude coordinate of the second location
+	 * @param lon2  The longitude coordinate of the second location
+	 *
+	 * @returns  The distance in kilometres between the two GPS locations
+	 */
+	action haversineDistanceInKM(decimal lat1, decimal lon1, decimal lat2, decimal lon2) returns decimal {
+		return haversineDistance(lat1, lon1, lat2, lon2, EARTH_RADIUS_KMS);
+	}
+	
+	
+	/**
+	 * This action implements the Haversine calculation to determine the distance (in miles) 
+	 * between two GPS coordinates.
+	 * 
+	 * @param lat1  The latitude coordinate of the first location
+	 * @param lon1  The longitude coordinate of the first location
+	 * @param lat2  The latitude coordinate of the second location
+	 * @param lon2  The longitude coordinate of the second location
+	 *
+	 * @returns  The distance in miles between the two GPS locations
+	 */
+	action haversineDistanceInMiles(decimal lat1, decimal lon1, decimal lat2, decimal lon2) returns decimal {
+		return haversineDistance(lat1, lon1, lat2, lon2, EARTH_RADIUS_MILES);
+	}
+
+	/** 
+	 * @private 
+	 */
+	action Radians(decimal deg) returns decimal {
+        return deg * (decimal.PI / 180.0d);
+    }
+
+	/**
+	 * This action implements the Haversine calculation to determine the distance between
+	 * two GPS coordinates, and the Earths radius as either Miles or Kilometres.
+	 * 
+	 * @private 
+	 */
+    action haversineDistance(decimal lat1, decimal lon1, decimal lat2, decimal lon2, decimal RADIUS) returns decimal {
+    	  decimal dLat := Radians(lat2-lat1);
+    	  decimal dLon := Radians(lon2-lon1); 
+    	  decimal a := (dLat/2.0d).sin() * (dLat/2.0d).sin() + Radians(lat1).cos() * Radians(lat2).cos() * (dLon/2.0d).sin() * (dLon/2.0d).sin();
+    	  decimal c := 2.0d * decimal.atan2(a.sqrt(), (1.0d-a).sqrt());
+    	  decimal d := RADIUS * c;
+    	  return d;
+    }
+}
+

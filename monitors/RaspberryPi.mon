@@ -1,0 +1,132 @@
+/*
+ * Copyright © 2010 - 2013 Apama Ltd.
+ * Copyright © 2013 - 2019 Software AG, Darmstadt, Germany and/or its licensors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ *   Licensed under the Apache License, Version 2.0 (the "License");
+ *   you may not use this file except in compliance with the License.
+ *   You may obtain a copy of the License at
+ *
+ *       http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *   Unless required by applicable law or agreed to in writing, software
+ *   distributed under the License is distributed on an "AS IS" BASIS,
+ *   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *   See the License for the specific language governing permissions and
+ *   limitations under the License.
+ *
+*/
+
+using com.softwareag.connectivity.ConnectivityPlugins;
+using com.apama.cumulocity.Measurement;
+using com.apama.cumulocity.MeasurementValue;
+using com.apama.cumulocity.Alarm;
+using com.industry.analytics.Data;
+
+event Temperature {
+	float reading;
+}
+
+monitor CallPlugin {
+	
+	constant string managedObjectId := "51837781";
+
+	// Import the Raspberry Pi Python plugin
+	import "RaspberryPiPythonPlugin" as raspberryPiPythonPlugin;
+	
+	action onload() {
+		monitor.subscribe("monitor_messages");
+		log "Subscribed to 'monitor_messages' channel" at INFO;
+	
+		monitor.subscribe("Spikes");
+		monitor.subscribe("Moving Average");
+		monitor.subscribe("Lower");
+		monitor.subscribe("Upper");
+		log "Subscribed to 'Spike' analytic output channels" at INFO;
+		
+		// Send Connectivity Plugin app Initialized message
+		ConnectivityPlugins.onApplicationInitialized();
+		
+		on all Temperature() as t {
+			Measurement measurement := temperatureToMeasurement(t, "Temperature");
+			
+			log "Sending Measurement: " + measurement.toString() at INFO;
+			send measurement to Measurement.CREATE_CHANNEL;	
+			
+			Data data := measurementToData(measurement, "c8y_Temperature", "Temperature");
+			log "Sending Data: " + data.toString() at INFO;
+			send data to data.streamName;
+			
+		}
+		
+		on all Data(streamName="Spikes") as d {
+			log "Received a spike: " + d.toString() at INFO;
+			Alarm alarm := dataToAlarm(d);
+			send alarm to Alarm.CHANNEL;
+		}
+		
+		on all Data(streamName="Moving Average") as d {
+			log "Received a Moving Average: " + d.toString() at INFO;
+			Measurement measurement := dataToMeasurement(d, "c8y_MovingAverageTemperatureMeasurement", "MovingAverage", "degrees C");
+			log "Sending 'MovingAverage' Measurement: " + measurement.toString() at INFO;
+			send measurement to Measurement.CREATE_CHANNEL;	
+		}
+
+		on all Data(streamName="Lower") as d {
+			log "Received a Lower: " + d.toString() at INFO;
+			Measurement measurement := dataToMeasurement(d, "c8y_LowerBandTemperatureMeasurement", "LowerBand", "degrees C");
+			log "Sending 'LowerBand' Measurement: " + measurement.toString() at INFO;
+			send measurement to Measurement.CREATE_CHANNEL;	
+		}
+
+		on all Data(streamName="Upper") as d {
+			log "Received a Upper: " + d.toString() at INFO;
+			Measurement measurement := dataToMeasurement(d, "c8y_UpperBandTemperatureMeasurement", "UpperBand", "degrees C");
+			log "Sending 'UpperBand' Measurement: " + measurement.toString() at INFO;
+			send measurement to Measurement.CREATE_CHANNEL;	
+		}
+	}
+	
+	action dataToAlarm(Data d) returns Alarm {
+		Alarm alarm := new Alarm;
+		alarm.type := "com_cumulocity_events_SpikeEvent";
+		alarm.time := currentTime;
+		alarm.text := d.dValue.toString();
+		alarm.status := "ACTIVE";
+		alarm.severity := "SEVERE";
+		alarm.source := d.sourceId;
+		return alarm;
+	}
+	
+	action temperatureToMeasurement(Temperature temperature, string key) returns Measurement {
+		Data data := new Data;
+		data.streamName := "Temperature";
+		data.type := "RAW";
+		data.sourceId := integer.getUnique().toString();
+		data.timestamp := currentTime.toDecimal();
+		data.dValue := temperature.reading.toDecimal();
+		return dataToMeasurement(data, "c8y_Temperature", key, "degrees C");
+	}
+	
+	action dataToMeasurement(Data data, string measurementType, string measurementKey, string measurementUnit) returns Measurement {
+		dictionary<string, dictionary<string, MeasurementValue> > measurementValues := new dictionary<string, dictionary<string, MeasurementValue> >;
+		dictionary<string, MeasurementValue> measurementValue := new dictionary<string, MeasurementValue>;
+		measurementValue.add(measurementKey, MeasurementValue(data.dValue.toFloat(), measurementUnit, new dictionary<string, any>));
+		measurementValues.add(measurementType, measurementValue);
+		Measurement measurement := Measurement("", measurementType, managedObjectId, currentTime, measurementValues, new dictionary<string, any>);
+		return measurement;
+	}
+	
+	action measurementToData(Measurement m, string type, string key) returns Data {
+		Data d := new Data;
+		d.streamName := "TemperatureData";
+		d.type := "RAW";
+		d.sourceId := managedObjectId;
+		d.timestamp := currentTime.toDecimal();
+		MeasurementValue mv := m.measurements[type][key];
+		d.dValue := mv.value.toDecimal();
+		return d;
+	}
+}
+

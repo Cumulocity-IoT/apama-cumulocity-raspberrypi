@@ -1,0 +1,790 @@
+//*****************************************************************************
+// Title:         Analytic
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+/** 
+ *  The intent is to have a set of delivered computation Analytics 
+ *  which can be chained together as desired with the framework, and 
+ *  to allow customers to easily create their own Analytics.  
+ * 
+ *  Implementations of Analytics will have to have the ability to 
+ *  listen for Data events, so that they can use incoming raw data, and 
+ *  the ability to send Data events so that queries and other components  
+ *  can be used if required. However, it is anticipated that in the  
+ *  general case one Analytic will be connected the next using an  
+ *  action callback interface as although this is more complex than simply  
+ *  listening to and sending Data events it is:
+ *  <ul><li>More performant than repeatedly converting events to be sent and
+ *  then back again, and</li>
+ *  <li>Will remove the cascade effect which could potentially occur if
+ *  analysis of an incoming event caused the production of multiple 
+ *  analysis events.</li></ul>
+ *  The Analytic event itself is sent to the Industry Analytics Kit 
+ *  by applications to create a new instance of a specified Analytic with 
+ *  a defined set of inputs/outputs and a dictionary containing Analytic specific
+ *  configuration information.
+ * 
+ *  For example:
+<code>
+// Gradient Analytic that receives the raw simulated data feed<br>
+enqueue com.industry.analytics.Analytic("Gradient", ["DataSimulator"], ["GRADIENT"], {"bucketTimeWindow":"6.0d", "bucketCount" : "4d"});
+
+// Two separate Threshold breach Analytics to cover both a positive and negative threshold breach<br>
+enqueue com.industry.analytics.Analytic("Threshold", ["GRADIENT"], ["THRESHOLDS"], {"threshold":"1.0d", "direction" : "rising"});
+enqueue com.industry.analytics.Analytic("Threshold", ["GRADIENT"], ["THRESHOLDS"], {"threshold":"-1.0d", "direction" : "falling"});
+</code>
+ *  
+ *  The set of Analytics that are currently distributed as part of the 
+ *  Industry Analytics Kit are shown in the table below:
+ *
+ *
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Group</th><th>Analytic Name</th><th>Description</th></tr>
+ *  <tr><td>Detectors</td><td><b><a href="detectors/Corridor.html">Corridor</a></b></td><td>Reports if a data source has breached a defined threshold corridor (above or below).</td></tr>
+ *  <tr><td>Detectors</td><td><b><a href="detectors/Drift.html">Drift</a></b></td><td>Monitors data against a defined baseline.</td></tr>
+ *  <tr><td>Detectors</td><td><b><a href="detectors/MissingData.html">MissingData</a></b></td><td>Reports when no data received for a data source after a automatically or manually defined period.</td></tr>
+ *  <tr><td>Detectors</td><td><b><a href="detectors/Spike.html">Spike</a></b></td><td>Automatically calculates a “normal” range for a value and reports when this is breached.</td></tr>
+ *  <tr><td>Detectors</td><td><b><a href="detectors/Threshold.html">Threshold</a></b></td><td>Reports if a data source has breached a defined threshold (above or below).</td></tr>
+ *  <tr><td>Extensions</td><td><b><a href="extensions/Prediction.html">Prediction</a></b></td><td>Feeds inputs into a Predictive model (PMML) and then streams the resulting output.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Combiner.html">Combiner</a></b></td><td>Combines several separate feeds into single channel name without modifying the sourceId information</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Duplicator.html">Duplicator</a></b></td><td>Duplicates a specified channel to one or more channel names.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/EventRate.html">EventRate</a></b></td><td>Calculates the incoming event rate.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Filter.html">Filter</a></b></td><td>Filter a stream based on properties of the incoming event.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Mapper.html">Mapper</a></b></td><td>Set the value of a field on the incoming event based on the value of another field.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Merger.html">Mapper</a></b></td><td>Merge 2 channels data into a single data on the output. Can alternatively be used to add static data to a single channel.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Slicer.html">Sorter</a></b></td><td>Generates a new set of events, each at a defined timeperiod apart and with its original value divided by the defined number of slices.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Sorter.html">Sorter</a></b></td><td>Reorders incoming events by timestamp to ensure events then processed in correct time order.</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Suppressor.html">Suppressor</a></b></td><td>Stops events after a trigger until a defined reset (event or time based).</td></tr>
+ *  <tr><td>Flow Manipulation</td><td><b><a href="flow_manipulation/Throttler.html">Throttler</a></b></td><td>Stops repeated events.</td></tr>
+ *  <tr><td>GeoLocation</td><td><b><a href="geolocation/GeoFence.html">GeoFence</a></b></td><td>Monitors provided locations against a variety of conditions and possible geoFence shapes.</td></tr>
+ *  <tr><td>Retail</td><td><b><a href="retail/BasketAnalysis.html">BasketAnalysis</a></b></td><td>Basket Analysis for retail shopping basket.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Average.html">Average</a></b></td><td>Time weighted moving average.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Delta.html">Delta</a></b></td><td>Calculates the differences between two neighboring values.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Expression.html">Expression</a></b></td><td>Calculates the result of an expression for each data event.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Gradient.html">Gradient</a></b></td><td>The gradient of the values the stream (i.e. increasing/decreasing trends).</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/MinMax.html">MinMax</a></b></td><td>Calculates the minimum and maximum values for a data stream over a defined time window.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Mode.html">Mode</a></b></td><td>Calculates the mode value for a data stream over a defined time window.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Spread.html">Spread</a></b></td><td>Calculates the spread between inputs and can also check against a maximum threshold.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Sum.html">Sum</a></b></td><td>Calculates moving sum.</td></tr>
+ *  <tr><td>Streaming Calculations</td><td><b><a href="streaming_calculations/Volatility.html">Volatility</a></b></td><td>The volatility (deviation in variance) of data values.</td></tr>
+ *  <tr><td>Utilities</td><td><b><a href="utilities/DataViewer.html">DataViewer</a></b></td><td>Sends the incoming events to a specified dataview.</td></tr>
+ *  <tr><td>Utilities</td><td><b><a href="utilities/MemoryStore.html">MemoryStore</a></b></td><td>Caches the Data events using MemoryStore, and exposes them in a dataview.</td></tr>
+ *  <tr><td>Utilities</td><td><b><a href="utilities/DataSimulator.html">DataSimulator</a></b></td><td>Generates simulated data for use by the Industry Analytics Kit.</td></tr>
+ *  </table>
+ * 
+ *  @see com.industry.analytics.Data  The Data event that the implementation 
+ *                                 of a Analytic will act on.
+ */
+event Analytic {
+	/** This constant defines the parameter name for deriving the managementId
+	 *  used for management of the analytic. This parameter is optional and common
+	 *  to all Analytics. However, dynamic management can only happen if this parameter is
+	 *  defined. */
+	constant string MANAGEMENT_ID := "managementId";
+	
+	/** Defines the name of the Analytic to construct.  Each implementation
+	 *  the default set of Analytics defines a string constant that should be 
+	 *  used here. */
+	string name;
+	/** This sequence defines one or more Data stream names that
+	 *  this Analytic will use as an input source. 
+	 *  @see com.industry.analytics.Data#name  The name of a unique Data stream
+	 */
+	sequence<string> inputDataNames;
+	/** This sequence defines one or more Data stream names that
+	 *  this Analytic will generate Data events on. 
+	 *  @see com.industry.analytics.Data#name  The name of a unique Data stream
+	 */
+	sequence<string> outputDataNames;
+	/** This stringified dictionary defines the set of Analytic
+	 *  specific configuration parameters.
+	 * 
+	 *  The following generic configuration parameters are supported:
+	 *  <ul>
+	 *  <li><font face="courier" size="-1">sendResultToChannel</font> -      This boolean flag defines whether or not the 
+	 *                                 Analytic will send all generated Data 
+	 *                                 events to a channel defined by the Data name.
+	 *                                 This is not mutually exclusive to the
+	 *                                 <font face="courier" size="-1">sendResultToQueryChannel</font>
+	 *                                 configuration param</li>
+	 *  <li><font face="courier" size="-1">sendResultToQueryChannel</font> - This boolean flag defines whether or not the 
+	 *                                 Analytic will send all generated Data 
+	 *                                 events to the channel defined for handling 
+	 *                                 Apama Queries (I.E. "com.apama.queries").
+	 *                                 This is not mutually exclusive to the
+     *                                 <font face="courier" size="-1">sendResultToChannel</font>
+     *                                 configuration param</li>
+     *  </ul>
+	 *  
+	 *  <b>NOTE:</b> Configuration parameter names are case insensitive.
+	 */
+	dictionary<string, string> params;
+	
+	/** This helper action is typically used by implementations of 
+	 *  a Analytic to perform a basic validation of the set of 
+	 *  Analytic configuration parameters provided.  It checks that the
+	 *  name of the Analytic is correct, that the input/output 
+	 *  Data channels are correct, and also checks that the
+	 *  values of specified parameters are of the correct data type, 
+	 *  and also checks that any mandatory fields are defined. 
+	 *  Any Analytic specific validation will be handled by the 
+	 *  Analytic implementation itself.
+	 * 
+	 *  @param analyticName           The name of the Analytic being validated. 
+	 *  @param numInputDataChannels   The number of input data channels that are expected/required. 
+	 *  @param numOutputDataChannels  The number of output data channels that are expected/required.
+	 *  @param names                  The set of configuration parameter names that are to be validated
+	 *                                Note that this must be defined in the same order as the #types parameter.
+	 *  @param types                  The set of configuration parameter types that are used in the validation. 
+	 *                                Note that this must be defined in the same order as the #names parameter.
+	 *  @param mandatory              The set of configuration parameter names that must be defined in the 
+	 *                                set of configuration parameters, otherwise validation will fail.
+	 *  @returns   A boolean value indicating whether the validation passed or failed.
+	 *  @see       #params  The set of configuration parameters that validation is being performed on
+	 */
+	action validateParams( string           analyticName,
+	                       integer          numInputDataChannels,
+	                       integer          numOutputDataChannels,
+	                       sequence<string> names,
+	                       sequence<string> types,
+	                       sequence<boolean> mandatory ) returns boolean {
+		log "Validating " + self.toString() at INFO;
+		boolean result := true;
+		
+		/////////////////////////////////////////
+		// Check the Analytic name was correct
+		/////////////////////////////////////////
+		if( ( name != analyticName ) 
+		and ( name != analyticName.toLower() ) ) then {
+			log "Invalid name provided to the "+analyticName+" Analytic: "+name at ERROR;
+			result := false;
+		} else {
+			/////////////////////////////////////////
+			// Check the input and output channels
+			/////////////////////////////////////////
+			
+			// If the number of input channels is -1 then the Analytic will 
+			// perform its own validation
+			if( numInputDataChannels != -1 ) then {
+				integer numInputs := inputDataNames.size();
+				if( numInputDataChannels != numInputs ) then {
+					if( numInputDataChannels = 0 ) then	{
+						log "inputDataNames sequence should be empty." at ERROR;
+					} else if( numInputDataChannels = 1 ) then	{
+						log "inputDataNames sequence should only have one entry." at ERROR;
+					} else if( numInputDataChannels != numInputs ) then {
+						log "inputDataNames sequence should contain "+numInputDataChannels.toString()+" entries" at ERROR;
+					}
+					log "  inputDataNames: " + inputDataNames.toString() at ERROR;
+					result := false;
+				} 
+					
+				// Check that no blank strings were provided either
+				// Also check for trimming the name
+				//dictionary<string,boolean> trimmedInputNames := new dictionary<string,boolean>;
+				sequence<string> trimmedInputNames := new sequence<string>;
+				string currInputName;
+				for currInputName in inputDataNames {
+					string trimmedName := currInputName.ltrim().rtrim();
+					if( trimmedName.length() = 0 ) then {
+						log "inputDataNames cannot contain blank strings." at ERROR;
+						result := false;
+					}
+					// Only add unique names to the sequence
+					// NOTE: We can't use a dictionary for uniqueness here, as when 
+					// we get the sequence back using .keys() it will sort it
+					if( trimmedInputNames.indexOf( trimmedName ) = -1 ) then {
+						trimmedInputNames.append( trimmedName );
+					}
+				}
+				// If the size of the trimmed version is not equal to the 
+				// input size, it means that we have two input names the same
+				if( trimmedInputNames.size() != inputDataNames.size() ) then {
+					log "inputDataNames should be different." at ERROR;
+					result := false;
+				} else {
+					// Override the provided set with our trimmed set
+					inputDataNames := trimmedInputNames.clone();
+				}
+			}
+			
+			// If the number of output channels is -1 then the Analytic will 
+			// perform its own validation
+			if( numOutputDataChannels != -1 ) then {
+				integer numOutputs := outputDataNames.size();
+				if( numOutputDataChannels != numOutputs ) then {
+					if( numOutputDataChannels = 0 ) then	{
+						log "outputDataNames sequence should be empty." at ERROR;
+					} else if( numOutputDataChannels = 1 ) then	{
+						log "outputDataNames sequence should only have one entry." at ERROR;
+					} else if( numOutputDataChannels != numOutputs ) then {
+						log "outputDataNames sequence should contain "+numOutputDataChannels.toString()+" entries" at ERROR;
+					}
+					log "  outputDataNames: " + outputDataNames.toString() at ERROR;
+					result := false;
+				} 
+						
+				// Check that no blank strings were provided either
+				// Also check for trimming the name
+				sequence<string> trimmedOutputNames := new sequence<string>;
+				string currOutputName;
+				for currOutputName in outputDataNames {
+					string trimmedName := currOutputName.ltrim().rtrim();
+					if( trimmedName.length() = 0 ) then {
+						log "outputDataNames cannot contain blank strings." at ERROR;
+						result := false;
+					} else if( inputDataNames.indexOf( trimmedName ) >= 0 ) then {
+						log "inputDataNames and outputDataNames should be different, otherwise it may result in cyclic behaviour." at ERROR;
+						result := false;
+					}				
+					// Only add unique names to the sequence
+					// NOTE: We can't use a dictionary for uniqueness here, as when 
+					// we get the sequence back using .keys() it will sort it
+					if( trimmedOutputNames.indexOf( trimmedName ) = -1 ) then {
+						trimmedOutputNames.append( trimmedName );
+					}
+				}
+				// If the size of the trimmed version is not equal to the 
+				// output size, it means that we have two output names the same
+				if( trimmedOutputNames.size() != outputDataNames.size() ) then {
+					log "outputDataNames should be different." at ERROR;
+					result := false;
+				} else {
+					// Override the provided set with our trimmed set
+					outputDataNames := trimmedOutputNames.clone();
+				}
+			}
+		}
+	
+		// Check the set of parameters
+		if( result ) then {
+			
+			integer sizeOfNames     := names.size();
+			integer sizeOfTypes     := types.size();
+			integer sizeOfMandatory := mandatory.size();
+	
+			// Make sure that the sequences provided were the same size
+			if( ( sizeOfNames != sizeOfTypes )
+			or  ( sizeOfNames != sizeOfMandatory )
+			or  ( sizeOfTypes != sizeOfMandatory ) ) then {
+				result := false;
+				log "  Sequences of different sizes were provided." at ERROR;
+			} else {
+				
+				// Covert the set of Params to lower case for
+				// case-insensitive matching when the Analytic is created
+				dictionary<string,string> loweredParams := new dictionary<string,string>;
+				string currParam;
+				for currParam in params.keys() {
+					string currLoweredParam := currParam.ltrim().rtrim().toLower();
+					if( loweredParams.hasKey( currLoweredParam ) ) then {
+						result := false;
+						log "  Duplicate parameters were provided that only differ by case." at ERROR;
+					} else {
+						loweredParams.add( currLoweredParam, params[ currParam ] );
+					}
+				}
+				// Replace the original params with the trimmed lower case version
+				params := loweredParams;
+			
+				integer index := 0;
+				while index < sizeOfNames {
+					string currName := names[index].toLower();
+					if( not params.hasKey( currName ) ) then	{
+						if( mandatory[index] ) then {
+							log "  Mandatory param " + names[index] + " missing." at ERROR;
+							result := false;
+						}
+					} else {
+						string currType  := types[ index ];
+						string currValue := params[ currName ].ltrim().rtrim().toLower();
+						
+						// Check that the value can be parsed to the defined type 
+						if not ( ( currType = Constants.BOOLEAN and boolean.canParse( currValue ) ) or
+						         ( currType = Constants.DECIMAL and decimal.canParse( currValue ) ) or
+						         ( currType = Constants.FLOAT   and float.canParse(   currValue ) ) or
+						         ( currType = Constants.INTEGER and integer.canParse( currValue ) ) or
+						         ( currType = Constants.SEQUENCE_STRING and sequence<string>.canParse( currValue ) ) or
+						         ( currType = Constants.STRING ) ) then {
+							result := false;
+							log "  Unable to parse param " + names[ index ] + " as " + currType at ERROR;
+						}
+					}
+					index := index + 1;
+				}
+			}
+		}
+	
+		return result;
+	}
+	
+	/** 
+	 *  This helper action returns a Boolean indicating whether 
+	 *  not a specified parameter name exists in the set of 
+	 *  Analytic configuration parameters.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action hasParam( string name ) returns boolean {
+		return params.hasKey( name.ltrim().rtrim().toLower() );
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Boolean value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Boolean value, the default parameter value specified is
+	 *  returned instead.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @param  def   The default value to return if the configuration
+	 *                parameter was not found, or not valid.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a Boolean, or the provided default value if the 
+	 *           configuration parameter was not found, or was not 
+	 *           a valid Boolean.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getOrBoolean( string name, boolean def ) returns boolean {	
+		boolean retValue := def;
+		string currValue := params.getOr( name.ltrim().rtrim().toLower(), def.toString() ).ltrim().rtrim().toLower();
+
+		// Check if we can parse the configuration value or not
+		if( boolean.canParse( currValue ) ) then {
+			retValue := boolean.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Decimal value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Decimal value, the default parameter value specified is
+	 *  returned instead.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @param  def   The default value to return if the configuration
+	 *                parameter was not found, or not valid.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a Decimal, or the provided default value if the 
+	 *           configuration parameter was not found, or was not 
+	 *           a valid Decimal.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getOrDecimal( string name, decimal def ) returns decimal {
+		decimal retValue := def;
+		string currValue := params.getOr( name.ltrim().rtrim().toLower(), def.toString() ).ltrim().rtrim();
+		// Check if we can parse the configuration value or not
+		if( decimal.canParse( currValue ) ) then {
+			retValue := decimal.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Float value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Float value, the default parameter value specified is
+	 *  returned instead.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @param  def   The default value to return if the configuration
+	 *                parameter was not found, or not valid.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a Float, or the provided default value if the 
+	 *           configuration parameter was not found, or was not 
+	 *           a valid Float.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getOrFloat( string name, float def ) returns float {
+		float retValue := def;
+		string currValue := params.getOr( name.ltrim().rtrim().toLower(), def.toString() ).ltrim().rtrim();
+		// Check if we can parse the configuration value or not
+		if( float.canParse( currValue ) ) then {
+			retValue := float.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Integer value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Integer value, the default parameter value specified is
+	 *  returned instead.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @param  def   The default value to return if the configuration
+	 *                parameter was not found, or not valid.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as an Integer, or the provided default value if the 
+	 *           configuration parameter was not found, or was not 
+	 *           a valid Integer.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getOrInteger( string name, integer def ) returns integer {
+		integer retValue := def;
+		string currValue := params.getOr( name.ltrim().rtrim().toLower(), def.toString() ).ltrim().rtrim();
+		// Check if we can parse the configuration value or not
+		// NOTE: We trim the returned string, as in Apama v9.9 a string with 
+		//       spaces is treated as a valid parsable value.
+		if( integer.canParse( currValue ) ) then {
+			retValue := integer.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, the default parameter value specified is
+	 *  returned instead.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @param  def   The default value to return if the configuration
+	 *                parameter was not found.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a string, or the provided default value if the 
+	 *           configuration parameter was not found.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getOrString( string name, string def ) returns string {
+		return params.getOr( name.ltrim().rtrim().toLower(), def );
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key as a 
+	 *  sequence of strings.  The stringified configuration 
+	 *  parameter is tested to see if it is a valid sequence 
+	 *  of strings before returning it.  If the specified key is not in 
+	 *  the set of configuration parameters, or was not a valid
+	 *  sequence type, the default parameter value specified is
+	 *  returned instead.
+	 *  
+	 *  @param   name  The name of the configuration parameter to 
+	 *                 get the value for.
+	 *  @param   def   The default value to return if the configuration
+	 *                 parameter was not found.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a sequence of strings, or the provided default value if the 
+	 *           configuration parameter was not found or was not a valid sequence&lt;string&gt;
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getOrSequenceString( string name, sequence<string> def ) returns sequence<string> {
+		sequence<string> retValue := def;
+		string currValue := getSequenceAsString( name );
+		// Check if we can parse the configuration value or not
+		if( sequence<string>.canParse( currValue ) ) then {
+			retValue := sequence<string>.parse( currValue );
+		} 
+		return retValue;
+	}
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Boolean value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Boolean value, a value of False is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a Boolean. Or a value of False if the configuration
+	 *           parameter was not found or was invalid.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getBoolean( string name ) returns boolean {
+		boolean retValue := false;
+		string currValue := params.getOrDefault( name.ltrim().rtrim().toLower() ).ltrim().rtrim().toLower();
+		// Check if we can parse the configuration value or not
+		if( boolean.canParse( currValue ) ) then {
+			retValue := boolean.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Decimal value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Decimal value, a value of 0d is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a Decimal. Or a value of 0.0d if the configuration
+	 *           parameter was not found or was invalid.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getDecimal( string name ) returns decimal {
+		decimal retValue := 0.0d;
+		string currValue := params.getOrDefault( name.ltrim().rtrim().toLower() ).ltrim().rtrim();
+		// Check if we can parse the configuration value or not
+		if( decimal.canParse( currValue ) ) then {
+			retValue := decimal.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Float value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Float value, a value of 0.0 is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a Float. Or a value of 0.0 if the configuration
+	 *           parameter was not found or was invalid.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+
+	action getFloat( string name ) returns float {
+		float retValue := 0.0;
+		string currValue := params.getOrDefault( name.ltrim().rtrim().toLower() ).ltrim().rtrim();
+		// Check if we can parse the configuration value or not
+		if( float.canParse( currValue ) ) then {
+			retValue := float.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. The 
+	 *  stringified configuration parameter is tested to see 
+	 *  if it is a valid Integer value before returning it.  
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, or if the parameter requested was not a valid
+	 *  Integer value, a value of 0 is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as an Integer. Or a value of 0 if the configuration
+	 *           parameter was not found or was invalid.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+
+	action getInteger( string name ) returns integer {
+		integer retValue := 0;
+		string currValue := params.getOrDefault( name.ltrim().rtrim().toLower() ).ltrim().rtrim();
+		// Check if we can parse the configuration value or not
+		// NOTE: We trim the returned string, as in Apama v9.9 a string with 
+		//       spaces is treated as a valid parsable value.
+		if( integer.canParse( currValue ) ) then {
+			retValue := integer.parse( currValue );
+		}
+		return retValue;	
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key. 
+     *  If the specified key is not in the set of configuration  
+	 *  parameters, an empty string is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a String. Or an empty String if the configuration
+	 *           parameter was not found.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+
+	action getString( string name ) returns string {
+		return params.getOrDefault( name.ltrim().rtrim().toLower() );
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key as a 
+	 *  stringified dictionary. If the specified key is not in 
+	 *  the set of configuration parameters, a stringified
+	 *  empty dictionary is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a stringified dictionary. Or an empty stringified  
+	 *           dictionary if the configuration parameter was not found.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+
+	action getDictionaryAsString( string name ) returns string {
+		return params.getOr( name.ltrim().rtrim().toLower(), "{}" );
+	}
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key as a 
+	 *  stringified sequence. If the specified key is not in 
+	 *  the set of configuration parameters, a stringified
+	 *  empty sequence is returned.
+	 *  
+	 *  @param  name  The name of the configuration parameter to 
+	 *                get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a stringified sequence. Or an empty stringified  
+	 *           sequence if the configuration parameter was not found.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+
+	action getSequenceAsString( string name ) returns string {
+		return params.getOr( name.ltrim().rtrim().toLower(), "[]" );
+	}
+
+	
+	/** 
+	 *  This helper action returns the configuration parameter
+	 *  item that corresponds to the specified key as a 
+	 *  sequence of strings.  The stringified configuration 
+	 *  parameter is tested to see if it is a valid sequence 
+	 *  of strings before returning it.  If the specified key is not in 
+	 *  the set of configuration parameters, or was not a valid
+	 *  sequence type, an empty sequence of strings is returned.
+	 *  
+	 *  @param   name  The name of the configuration parameter to 
+	 *                 get the value for.
+	 *  @returns The value of the requested configuration parameter 
+	 *           as a sequence of strings. Or an empty sequence if 
+	 *           the configuration parameter was not found, or was invalid.
+	 *
+	 *  @see #params  The set of configuration parameters for the Analytic instance
+	 */
+	action getSequenceString( string name ) returns sequence<string> {
+		sequence<string> retValue := [];
+		string currValue := getSequenceAsString( name );
+		// Check if we can parse the configuration value or not
+		if( sequence<string>.canParse( currValue ) ) then {
+			retValue := sequence<string>.parse( currValue );
+		}
+		return retValue;
+	}
+	
+	
+	/**
+	 *  This action returns the analyticId provided in the params of the Analytic event.
+	 *  If the param is not present then an empty string is returned. If ann empty or
+	 *  whitespace only string is explicitly provided, then a warning is logged and an
+	 *  empty string is returned. All ids will be trimmed of white space at the beginning and
+	 *  end. An empty string means no management operations will be available for the Analytic
+	 *  instance being created from this Analytic event.
+	 */
+	action getManagementId() returns string {
+		string result := "";
+		result := getOrString( MANAGEMENT_ID, result ).ltrim().rtrim();
+		if( result = "" and hasParam( MANAGEMENT_ID ) ) then {
+			log "Empty or whitespace only " + MANAGEMENT_ID +
+				" provided. Analytic management will not be available for this Analytic." at WARN;
+		}
+		return result;
+	}
+}
+
+
+/**
+ *  This event exists to allow dynamic management of Analytics created using
+ *  the Analytic event.
+ *
+ *  DELETE: deletes a analytic instance.
+ *  RESET:  resets a analytic instance to it's initial state.
+ *  START:  starts a analytic instance listening for incoming Data event. By default this also resets the instance.
+ *  STOP:	stops a analytic from listening to incoming Data events.
+ */
+event AnalyticManagement {
+	/** The analyticId of the analytic to be altered, originally defined in
+	 *  the params of the Analytic event. */
+	string analyticId;
+	/** The command to be acted upon. Legal values defined in the constants for
+	 *  this event. */
+	string command;
+	/** Management params. */
+	dictionary<string, string> params;
+}
+
+
+/** 
+*  This internal Monitor is used to automatically intern 
+*  any string constants that are defined that are associated
+*  with the Analytic events in order to improve  
+*  performance when handling strings.
+*
+*  Note: The listener that is created is required in order
+*        to keep the monitor alive between a Persistant  
+*        Correlators recovery.  Otherwise, this would be a 
+*        transient monitor, and it would not be recovered.  
+*        Which would then mean that the strings would not
+*        interned in the recovered Correlator.
+*
+*  @private
+*/
+monitor InternAnalytic {
+	event StayAlive {}
+	
+	action onload() {
+		string discard := Analytic.MANAGEMENT_ID.intern();
+
+		on all StayAlive() {}
+	}
+}
+

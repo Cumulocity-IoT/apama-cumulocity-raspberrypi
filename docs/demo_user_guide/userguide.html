@@ -1,0 +1,71 @@
+﻿<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>userguide</title>
+  <link rel="stylesheet" href="https://stackedit.io/style.css" />
+</head>
+
+<body class="stackedit">
+  <div class="stackedit__html"><h1 id="raspberry-pi-sensehat-with-apama-python-plugin-and-cumulocity">Raspberry Pi Sensehat with Apama Python Plugin and Cumulocity</h1>
+<p><img src="./images/RaspberryPiPythonPluginC8y.png" alt="Raspberry Pi with PythonPlugin connected to Cumulocity"><br>
+In this demo, Apama 10.3 is being used to read data from a Raspberry Pi fitted with a Sensehat. Apama is running a python plugin which is reading the temperature from the Sensehat.<br>
+The temperature data is being converted into Cumulocity Measurement events and is then sent to the Cumulocity tenant.<br>
+The Temperature data is also being converted into a Industry Analytics Kit Data event which is being fed through a ‘Spike’ Analytic to generate<br>
+Moving Average, UpperBand and LowerBand for the temperature value. This additional data is being converted into Measurement events which are sent to Cumulocity.</p>
+<h2 id="installation">Installation</h2>
+<ol>
+<li>
+<p>Download and install the latest Raspian image from <a href="https://downloads.raspberrypi.org/raspbian_full_latest">https://downloads.raspberrypi.org/raspbian_full_latest</a></p>
+</li>
+<li>
+<p>Download and install the Cumulocity Agent for the Raspberry Pi. This is available from <a href="https://cumulocity.com/guides/devices/raspberry-pi/">https://cumulocity.com/guides/devices/raspberry-pi/</a></p>
+</li>
+<li>
+<p>Download and install the “Apama Community Edition” from “<a href="https://downloads.apamacommunity.com/apama-core/10.3.0.2/apama_core_10.3.0.2_armv7_linux.tar.gz">https://downloads.apamacommunity.com/apama-core/10.3.0.2/apama_core_10.3.0.2_armv7_linux.tar.gz</a>”</p>
+</li>
+<li>
+<p>Download and install the Cumulocity Transport for Apama from <a href="https://downloads.apamacommunity.com/apama-core/10.3.0.2/apama_cumulocity_transport_10.3.0.2.zip">https://downloads.apamacommunity.com/apama-core/10.3.0.2/apama_cumulocity_transport_10.3.0.2.zip</a></p>
+</li>
+<li>
+<p>As Apama requires Python3.6, this will need to be downloaded and built before a python plugin can be used inside Apama. The instructions for this are available from <a href="https://github.com/kpalf/ApamaSenseHat/tree/master/HelloWorld">https://github.com/kpalf/ApamaSenseHat/tree/master/HelloWorld</a> (See section “Building and setting up Python 3.6”)</p>
+</li>
+<li>
+<p>Download the <strong>ApamaRaspPiPythonPluginCumulocity</strong> code from github and install onto your Raspberry Pi.</p>
+</li>
+</ol>
+<h2 id="upfront-preparation">Upfront Preparation</h2>
+<p>Once the “RaspberryPiPythonPlugin” code has been unzipped, you will need to make a few configuration changes to ensure that it is sending the Sensehat Temperature data to the correct device inside your Cumulocity tenant.</p>
+<ul>
+<li>
+<p>Cumulocity Client Configuration</p>
+<p>The Cumulocity connection settings are stored in :<br>
+<strong>\RaspberryPiPythonPlugin\config\connectivity\CumulocityClient9.0+\CumulocityIoT.properties</strong></p>
+<p>Edit the “<strong>CumulocityIoT.properties</strong>” file. This file will need to be updated with the tenant, username, password and appkey for your Cumulocity tenant</p>
+</li>
+<li>
+<p>Find the managedObjectId for your Cumulocity device<br>
+Once you have installed the Cumulocity Agent onto your Raspberry pi and have registered the device with your Cumulocity tenant, it will be allocated a unique managedObjectId. To find this id, log into your Cumulocity tenant and locate your device inside ‘DEVICE MANAGEMENT’. In the ‘Info’, tab, the managedObjectId is displayed in the ‘DEVICE DATA’ section as the ‘ID’</p>
+</li>
+</ul>
+<ul>
+<li>
+<p>Update the demo with your managedObjectId for your device<br>
+To update the code to your managedObjectId, open “<strong>\RaspberryPiPythonPlugin\monitors\RaspberryPi.mon</strong>”</p>
+<p>Search for “<strong>constant string managedObjectId :=</strong>”</p>
+<p>Ensure that the managedObjectId you found above is updated here</p>
+</li>
+</ul>
+<h2 id="running-the-demo">Running the demo</h2>
+<p>To run the demo</p>
+<ol>
+<li>Open a terminal window on your raspberry pi and cd into your ‘RaspberryPiPythonPlugin’ folder</li>
+<li>type : 	<strong>correlator --config .</strong></li>
+<li>This will start up the Raspberry Pi Demo. Temperature readings will be sent every 10 seconds to the device identified by the managedObjectId inside your Cumulocity Tenant</li>
+</ol>
+</div>
+</body>
+
+</html>

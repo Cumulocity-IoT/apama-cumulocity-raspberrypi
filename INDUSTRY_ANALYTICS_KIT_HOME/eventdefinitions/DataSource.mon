@@ -1,0 +1,283 @@
+//*****************************************************************************
+// Title:         DataSource
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.exceptions.Exception;
+
+/** This object is currently not used.
+ *  @private 
+ */
+event DataSourceParam
+{	
+	/** This constant defines the name of the MemoryStore table that
+	 *  is used to persist the DataSource data for the configured Industry Analytics Kit */	
+	constant string TABLE_NAME := "DataSourceParams";
+	
+	string id;
+	string name;
+	wildcard string value;
+	
+	/** 
+	 *  This helper action generates a key value for the a unique row 
+	 *  in the MemoryStore table for storing/retrieving information 
+	 *  about a specific DataSource.
+	 * 
+	 *  @returns  A string containing a unique key value for the current DataSource.
+	 *  
+	 *  @private 
+	 */ 
+	action getKey() returns string {
+		return id+"_"+name;
+	}
+	
+	/** 
+	 *  This helper action populates a MemoryStore row from the specified
+	 *  table with the current set of DataSourceParam.
+	 * 
+	 *  @param    t   The MemoryStore table used for storing DataSources
+	 *  @returns      A string containing a unique key value for the current DataSourceParam.
+	 *  
+	 *  @private 
+	 */ 
+	action getRow( com.apama.memorystore.Table t ) returns com.apama.memorystore.Row {
+		com.apama.memorystore.Row row := t.get( getKey() );
+		row.setString( "id",      id );
+		row.setString( "name",    name );
+		row.setString( "value",   value );
+		return row;
+	}	
+	
+	/** 
+	 *  This helper action populates the current DataSourceParam object instance 
+	 *  with the information in the specified MemoryStore row.
+	 * 
+	 *  <b>Note:</b> This action will overwrite any previous values that 
+	 *               were defined in this objects instance.
+	 * 
+	 *  @param   row  The MemoryStore row to be used for populating the current DataSourceParam
+	 *  
+	 *  @private 
+	 */ 
+	action populateFromRow( com.apama.memorystore.Row row )
+	{
+		// Check that the row is actually in the table
+		if( row.inTable() ) then {
+			id     := row.getString("id");
+			name   := row.getString("name");
+			value  := row.getString("value");
+		}
+	}
+}
+
+/** 
+*  The com.industry.analytics.AddDataSource event requests that a DataSource should be 
+*  added to the hierachy of DataSources. This is used to define the relationships/grouping of 
+*  different DataSources, so that they can be later referenced as a set of DataSources or as an
+*  individual DataSource.  For example, an DataSource could be non-physical parent node which 
+*  defines the set of sensors for a specific machine, this then has a set of physical devices 
+*  associated with it.
+*
+*  @see com.industry.analytics.DataSource   The DataSource event that is created using this request
+*/
+event AddDataSource {
+	/** The unique identifier for this specific DataSource. */
+	string id;
+	/** The identifier for this type of DataSource. This can be used for grouping individual DataSources */
+	string sourceTypeId;
+	/** The name of this DataSource. <b>Note:</b> This does not have to be a unique value. */
+	string name;
+	/** The description for this DataSource. */
+	wildcard string description;
+	/** The parent sourceId associated with the current DataSource. */
+	string parentId;
+	/** A set of stringified extra configuration information for this DataSource. */
+	wildcard dictionary<string, string> params;
+
+	static action init( string id, string sourceTypeId, string name, string description, 
+	                    string parentId, dictionary<string, string> params ) returns AddDataSource {
+		AddDataSource ds := new AddDataSource;
+		ds.id            := id;
+		ds.sourceTypeId  := sourceTypeId;
+		ds.name          := name;
+		ds.description   := description;
+		ds.parentId      := parentId;
+		ds.params        := params.clone();
+		return ds;
+	}
+}
+	
+
+/** 
+ *  The com.industry.analytics.DataSource event defines a specific DataSource that is being monitored.
+ *  Each DataSource can also define the relationships/grouping of different DataSources, so that
+ *  they can be later referenced as a set of DataSources or as an individual DataSource.  For 
+ *  example, an DataSource could be non-physical parent node which defines the set of sensors
+ *  for a specific machine, this then has a set of physical devices associated with it.
+ *
+ *  @see com.industry.analytics.SourceIdsRequest   The request event to retrieve all DataSource 
+ *                                                 data associated with a specified DataSource
+ *  @see com.industry.analytics.SourceIdsResponse  The response to a com.industry.analytics.SourceIdsRequest request. 
+ */
+event DataSource {
+	/** This constant defines the name of the MemoryStore table that
+	 *  is used to persist the DataSource data for the configured Industry Analytics Kit */	
+	constant string TABLE_NAME := "DataSource";
+
+	/** The unique identifier for this specific DataSource. */
+	string id;
+	/** The identifier for this type of DataSource. This can be used for grouping individual DataSources */
+	string sourceTypeId;
+	/** The name of this DataSource. <b>Note:</b> This does not have to be a unique value. */
+	string name;
+	/** The description for this DataSource. */
+	wildcard string description;
+	/** The parent sourceId associated with the current DataSource. */
+	string parentId;
+	/** The child sourceId associated with the current DataSource. */
+	dictionary<string,boolean/*not_used*/> childIds;
+	/** A set of stringified extra configuration information for this DataSource. */
+	wildcard dictionary<string, string> params;
+
+	static action init( string id, string sourceTypeId, string name, string description, 
+	                    string parentId, dictionary<string, string> params ) returns DataSource {
+		DataSource ds   := new DataSource;
+		ds.id           := id;
+		ds.sourceTypeId := sourceTypeId;
+		ds.name         := name;
+		ds.description  := description;
+		ds.parentId     := parentId;
+		ds.params       := params.clone();
+		return ds;
+	}
+	
+	/** 
+	 *  This helper action interns the strings used by the DataSource in order to 
+	 *  improve the performance of string manipulation in the application.
+	 *  
+	 *  @private 
+	 */ 
+	action intern() {
+		string discard := TABLE_NAME.intern();
+		string field;
+		for field in self.getFieldNames() {
+			discard := field.intern();
+		}
+	}
+	
+	/** 
+	 *  This helper action generates a key value for the a unique row 
+	 *  in the MemoryStore table for storing/retrieving information 
+	 *  about a specific DataSource.
+	 * 
+	 *  @returns  A string containing a unique key value for the current DataSource.
+	 *  
+	 *  @private 
+	 */ 
+	action getKey() returns string {
+		return id;
+	}
+	
+	/** 
+	 *  This helper action populates a MemoryStore row from the specified
+	 *  table with the current DataSources set of parameters.
+	 * 
+	 *  @param    t   The MemoryStore table used for storing DataSources
+	 *  @returns  A string containing a unique key value for the current DataSource.
+	 *  
+	 *  @private 
+	 */ 
+	action getRow( com.apama.memorystore.Table t ) returns com.apama.memorystore.Row {
+		com.apama.memorystore.Row row := t.get( getKey() );
+		row.setString( "id",           id);
+		row.setString( "sourceTypeId", sourceTypeId);
+		row.setString( "name",         name);
+		row.setString( "description",  description);
+		row.setString( "parentId",     parentId);
+		row.setString( "childIds",     childIds.toString());
+		row.setString( "params",       params.toString());
+		return row;
+	}
+	
+	/** 
+	 *  This helper action populates the current DataSource object instance 
+	 *  with the information in the specified MemoryStore row.
+	 * 
+	 *  <b>Note:</b> This action will overwrite any previous values that 
+	 *               were defined in this objects instance.
+	 * 
+	 *  @param   row  The MemoryStore row to be used for populating the current DataSource
+	 *  
+	 *  @private 
+	 */ 
+	action populateFromRow( com.apama.memorystore.Row row ) {
+		// Check that the row is actually in the table
+		if( row.inTable() ) then {
+			id           := row.getString( "id" );
+			sourceTypeId := row.getString( "sourceTypeId" );
+			name         := row.getString( "name" );
+			description  := row.getString( "description" );
+			parentId     := row.getString( "parentId" );
+			
+			try {
+				childIds := childIds.parse( row.getString( "childIds" ) );
+			} catch (Exception e) {
+				params := {};
+				log "Unable to parse childIds dictionary from string '" + row.getString("childIds") +
+					"' for DataSource Id "+ id +", name "+ name at ERROR;
+			}
+
+			
+			try {
+				params := params.parse( row.getString( "params" ) );
+			} catch (Exception e) {
+				params := {};
+				log "Unable to parse params dictionary from string '" + row.getString("params") +
+					"' for DataSource Id "+ id +", name "+ name at ERROR;
+			}
+		} else {
+			// If the row was not in the table, then just clear the params
+			params := {};
+		}
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the DataSource objects in order to improve performance
+ *  when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternDataSource {
+	event StayAlive {}
+	
+	action onload() {
+		(new DataSource).intern();
+		on all StayAlive() {}
+	}
+}

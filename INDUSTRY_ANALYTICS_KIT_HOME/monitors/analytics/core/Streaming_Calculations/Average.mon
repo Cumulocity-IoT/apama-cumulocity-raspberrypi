@@ -1,0 +1,331 @@
+//*****************************************************************************
+// Title: Average Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.streaming_calculations;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+using com.industry.analytics.TimeWeightedMovingAverage;
+
+/* @AnalyticDefinition
+{
+	"name": "Average",
+	"description": "Generates moving average from the input data.",
+	"group": "Streaming Calculations",
+	"documentation": "com/industry/analytics/streaming_calculations/Average.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel used to calculate a moving average",
+            "dataProperties": ["dValue"] 
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Average",
+			"description": "The channel where moving average data is output",
+            "dataProperties": ["+dValue"]
+        }
+	],
+	"properties": [
+		{
+			"name": "timeWindow",
+			"description": "Defines the time window to calculate the moving average over",
+			"type": "decimal",
+			"optional": true,
+			"defaultValue": 60,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0.0' }",
+			"postfix": "(Seconds)"
+		},{
+			"name": "bySourceId",
+			"description": "If defined, the Average calculations are partitioned based on the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+
+/**
+ *  The Average Analytic computation generates a Data containing 
+ *  a moving average calculation for each input Data received. 
+ * 
+ *  NOTE: Should have at least 5 events in the timeWindow.
+ *
+ *  The following formulas are implemented: 
+ * 
+ *  Standard formulation:<font face="courier" size="-1"><br><br>
+    ma_n = a * x_n + (1 - a) * ma_n-1<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ma_n-1 + a * (x_n - ma_n-1)<br>
+    a = (1 - e^-u)<br>
+    u = (t_n - t_n-1) / T<br>
+    <br><br>
+    Re-arrange for efficiency:<br><br>
+    ma_n = (1 - a) * x_n + a * ma_n-1<br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= x_n + a * (ma_n-1 - x_n)<br>
+    a = e^-u<br>
+    u = (t_n - t_n-1) / T<br>
+    </font>
+ *
+ *  Note: If there are multiple values (x_n) for a particular timestamp (t_n) then the average is used
+ *  Note: If t_n < t_n-1 then the value is ignored
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. All the
+ *      <font face="courier" size="-1">params</font> from the input Data are copied to the moving average Data.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>Defines the time window to calculate the moving average over</td>
+ *      <td>Stringified decimal <font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">60.0d</font></td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the Average calculations are partitioned based on the <font face="courier" size="-1">sourceId</font> of the <font face="courier" size="-1">Data</font> events</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Average Analytic which takes Data events on the channel "Input1"  
+// and calculates a moving average values in a 30.0 second time window. It publishes
+// a Data event with the calculated moving average on the output channel "Output1".   
+send com.industry.analytics.Analytic("Average", ["Input1"], ["Output1"], {"timeWindow":"30.0"} ) to "";
+</code></dd>
+ *</dl>
+ *  @see com.industry.analytics.Volatility  The Volatility Analytic which can also output the same Average calculation if required.
+ */
+event Average
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Average";
+	
+	/** This constant defines the configuration parameter name
+	 *  that specifies the time window to calculate the moving 
+	 *  average over */
+	constant string TIMEWINDOW := "timeWindow";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the Average calculation will be
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	
+	// State
+	/** Local cached dictionary of the moving average values, keyed by
+	 *  the sourceId.
+	 *  @private */
+	dictionary<string /*sourceId*/, TimeWeightedMovingAverage> _movingAverages;
+	
+	/** Local cached value for the timeWindow configuration parameter value
+	 *  @private */
+	decimal _timeWindow;
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+		
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [TIMEWINDOW, BY_SOURCEID], 
+		                                         [Constants.DECIMAL, Constants.BOOLEAN], 
+		                                         [false, false] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+	
+			_timeWindow := config.getOrDecimal( TIMEWINDOW, 60.0d );
+			if( _timeWindow <= 0.0d ) then {
+				log "  Param timeWindow must be positive. Given value: " + _timeWindow.toString() at ERROR;
+				result := false;
+			}
+			
+			_bySourceId := config.getOrBoolean( BY_SOURCEID, true );
+		}
+		
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 * 
+	 *  The following formulas are implemented: 
+	 * 
+	 *  Standard formulation:
+	 *  ma_n = a * x_n + (1 - a) * ma_n-1
+	 *       = ma_n-1 + a * (x_n - ma_n-1)
+	 *  a = (1 - e^-u)
+	 *  u = (t_n - t_n-1) / T
+	 *
+	 *  Re-arrange for efficiency:
+	 *  ma_n = (1 - a) * x_n + a * ma_n-1
+	 *       = x_n + a * (ma_n-1 - x_n)
+	 *  a = e^-u
+	 *  u = (t_n - t_n-1) / T
+ 	 *
+ 	 *  @param   dataIn  The input Data event to be processed by this Analytic
+ 	 * 
+ 	 *  @private
+ 	 */
+	action processData(Data dataIn)
+	{
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+			
+		if( _movingAverages.hasKey( sourceId ) ) then {
+			_movingAverages[ sourceId ].update( dataIn.dValue, dataIn.timestamp );
+		} else {
+			TimeWeightedMovingAverage ma := new TimeWeightedMovingAverage;
+			ma.init( dataIn.dValue, dataIn.timestamp, _timeWindow );
+			_movingAverages[ sourceId ] := ma;
+		}
+		
+		Data dataOut := dataIn.clone();
+		dataOut.streamName := _outputDataName;
+		dataOut.type       := DataConstants.COMPUTED;
+		dataOut.dValue     := _movingAverages[ sourceId ].eMa();
+		_analyticObject.sendData( dataOut );
+	}
+
+
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset() {
+		_movingAverages.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Average Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternAverage {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Average.NAME.intern();
+		discard := Average.TIMEWINDOW.intern();
+		discard := Average.BY_SOURCEID.intern();
+		discard := Average.CONST_INTERNAL_ALL_SOURCES.intern();
+		on all StayAlive() {}
+	}
+}

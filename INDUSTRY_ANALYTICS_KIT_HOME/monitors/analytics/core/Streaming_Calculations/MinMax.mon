@@ -1,0 +1,520 @@
+//*****************************************************************************
+// Title: MinMax Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.streaming_calculations;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/**
+ * Defines a bucket of calculations for the Min/Max Analytic to use.
+ * Applications should not use this event definition directly.
+ * @private
+ */
+event MinMaxBucket {
+	decimal minValue;
+	decimal maxValue;
+	
+	decimal bucketEndTimestamp;
+}
+
+/* @AnalyticDefinition
+{
+	"name": "MinMax",
+	"description": "Calculates the min/max values for the input Data.",
+	"group": "Streaming Calculations",
+	"documentation": "com/industry/analytics/streaming_calculations/MinMax.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channels to calculate the min/max values for",
+			"dataProperties": ["dValue"]
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "MinMax",
+			"description": "The data channel containing the min/max data values",
+			"dataProperties": ["-dValue", "-sValue", "+xValue", "+yValue", "-zValue", "-params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "timeWindow",
+			"description": "The time window (in seconds) to calculate the min/max values over",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"defaultValue": 60,
+			"optional": true,
+			"postfix": "(Seconds)"
+		},{
+			"name": "bySourceId",
+			"description": "Defines whether or not the min/max values are partitioned by the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced":true
+		},{
+			"name": "bucketCount",
+			"description": "Defines the number of points to use in the min/max calculation.",
+			"type": "integer",
+			"defaultValue": 6,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"optional": true,
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The MinMax Analytic calculates the minimum and maximum values for an 
+ *  input data stream over a defined time window. This is achieved by creating 
+ *  a defined number of "buckets" (default 6) which cover the defined time window. 
+ *  The minimum and maximum values are kept for each buckets worth of time, 
+ *  which can then be used to quickly calculate the overall values for long time ranges.
+ *  The minimum and maximum values are published on the output channel.  
+ *  If the optional parameter <font face="courier" size="-1">bySourceId</font> 
+ *  is provided, the MinMax partitions all incoming <font face="courier" size="-1">Data</font>
+ *  events by the <font face="courier" size="-1">sourceId</font> parameter value. 
+ *  The output <font face="courier" size="-1">Data</font> event <font face="courier" size="-1">dValue</font> contains the new MIN or MAX value, 
+ *  <font face="courier" size="-1">xValue</font> contains newly calculated MIN value and  
+ *  <font face="courier" size="-1">yValue</font> contains newly calculated MAX value.
+ * </br>
+ *  NOTE: In case of both Min and Max value changes after end of timeWindow, Max value will be contained in output <font face="courier" size="-1">Data</font> event <font face="courier" size="-1">dValue</font>.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>One or more input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>Defines the time window (in seconds) to calculate the min/max values over</td>
+ *      <td>Must be <font face="courier" size="-1"> > 0.0d</font></td><td>decimal</td><td>False</td><td><font face="courier" size="-1">60.0d</font></td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the min/max values are calculated based on the <font face="courier" size="-1">sourceId</font> of the <font face="courier" size="-1">Data</font> events</td>
+ *      <td>Non-Empty String</td><td>String</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  <tr><td><b>bucketCount</b></td><td>Defines the number of points to use in the min/max calculation.</td>
+ *      <td>Must be <font face="courier" size="-1">>= 1</font></td><td>integer</td><td>False</td><td><font face="courier" size="-1">6</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a MinMax Analytic which takes Data events received on the input 
+// channel "Input1" and publishes a Data event with the calculated minimum
+// and maximum values over a 20 second time window on the output channel ("Output1")
+send com.industry.analytics.Analytic("MinMax", ["Input1"], ["Output1"], {"timeWindow":"20.0"} ) to "";
+
+// Define a MinMax Analytic which takes Data events received on the input 
+// channel "Input1" and publishes a Data event with the calculated minimum
+// and maximum values over a 20 second time window on the output channel ("Output1")
+// but are calculated over ANY input Data events regardless of their sourceId value.
+send com.industry.analytics.Analytic("MinMax", ["Input1"], ["Output1"], {"bySourceId":"false","timeWindow":"20.0"} ) to "";
+</code></dd>
+ *</dl>
+ */ 
+event MinMax
+{
+	import "TimeFormatPlugin" as timeFormat;
+	
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "MinMax";
+
+	/** This constant defines the configuration parameter name
+	 *  that defines the time window that the min/max values will 
+	 *  be calculated over. */
+	constant string TIME_WINDOW := "timeWindow";
+
+	/** This constant defines the configuration parameter name
+	 *  that defines the number of points to use in the min/max calculation */
+	constant string BUCKET_COUNT := "bucketCount";
+
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the min/max values will be 
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	/** Local cached value for the time window per-bucket (IE the timewindow 
+	 *  divided by the number of buckets)
+	 *  @private */
+	decimal _bucketTimeWindow;
+
+	/** Local cached value for the bucketCount configuration parameter value
+	 *  @private */
+	integer _bucketCount;
+
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId;
+
+	/** Local cached value for the current overall min/max value
+	 *  @private */
+	dictionary<string/*sourceId*/,MinMaxBucket> _overallMinMax;
+
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+
+	dictionary<string/*sourceId*/,sequence<MinMaxBucket> > _buckets;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+	/** Local cache saving the change value (min or max)
+	 * @private */
+	decimal _changeValue;
+
+	/** Local cached copy of the overall timewindow defined
+	 *  @private */
+	decimal _timeWindow;
+	
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                                 to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ TIME_WINDOW, BY_SOURCEID, BUCKET_COUNT ],
+		                                         [ Constants.DECIMAL, Constants.BOOLEAN, Constants.INTEGER ], 
+		                                         [ false, false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+			
+			_timeWindow  := config.getOrDecimal( TIME_WINDOW, 60.0d);
+			if( _timeWindow <= 0.0d ) then	{
+				log TIME_WINDOW + " must be greater than 0. Provided value: " + _timeWindow.toString() at ERROR;
+				result := false;
+			}
+			
+			_bucketCount := config.getOrInteger( BUCKET_COUNT, 6 );
+			if( _bucketCount < 1 ) then {
+				log BUCKET_COUNT + " must be at least 1. Provided value: " + _bucketCount.toString() at ERROR;
+				result := false;
+			}
+			_bucketTimeWindow := _timeWindow / _bucketCount.toDecimal();
+
+			_bySourceId    := config.getOrBoolean( BY_SOURCEID, true );
+		} 
+
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		// If we do have a set of buckets for this sourceId, clear out any old ones
+		
+		// Re-send the Data on the output channel defined.
+		Data dOut := dataIn.clone();
+		dOut.streamName := _outputDataName;
+		
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+
+		// This flag allows us to forcibly publish an update
+		// which is used if we need to expire old buckets
+		boolean forceUpdate := false;
+
+		// Check if we already have a bucket for this sourceId
+		// if not, create a new one
+		if( not _buckets.hasKey( sourceId ) ) then {
+			sequence<MinMaxBucket> b := [ MinMaxBucket( dataIn.dValue, 
+			                                            dataIn.dValue, 
+			                                            dataIn.timestamp + _bucketTimeWindow ) ];
+			b.setCapacity( _bucketCount );
+			_buckets[ sourceId ] := b;
+		} else {
+			
+			// Clone the buckets, as we dont want to delete from the sequence we 
+			// are iterating over
+			sequence<MinMaxBucket> tempBuckets := _buckets[ sourceId ].clone();
+			MinMaxBucket b;
+			for b in _buckets[ sourceId ] {
+				// If the bucket is expired then remove it
+				if( dataIn.timestamp - _timeWindow >= b.bucketEndTimestamp - _bucketTimeWindow ) then {
+					tempBuckets.remove( 0 );
+				} else {
+					// As we are iterating over buckets from oldest->newest
+					// as soon as we hit a non-expired bucket, then we can quit
+					// the loop
+					break;
+				}
+			}
+			// If we didn't completely clear the buckets
+			// but we did remove things, we need need to update the 
+			// overall calculation
+			if( tempBuckets.size() != 0
+			and tempBuckets.size() != _buckets[ sourceId ].size() ) then {
+				_updateOverallMinMaxFromBuckets(sourceId, tempBuckets);
+				
+				// Flag that we want to force a new update due to expiring buckets
+				forceUpdate := true;
+			}
+			_buckets[ sourceId ] := tempBuckets;
+			if( _buckets[ sourceId ].size() = 0 ) then {
+				sequence<MinMaxBucket> b := [ MinMaxBucket( dataIn.dValue, 
+															dataIn.dValue, 
+															dataIn.timestamp + _bucketTimeWindow ) ];
+				b.setCapacity( _bucketCount );
+				_buckets[ sourceId ] := b;
+		
+				// Also clear the overall min/max value
+				if( _overallMinMax.hasKey( sourceId ) ) then {		
+					_overallMinMax.remove( sourceId );
+				}
+			}
+		}
+		
+		// Also add a current overall min/max value
+		if( not _overallMinMax.hasKey( sourceId ) ) then {
+			_overallMinMax.add( sourceId, MinMaxBucket( dataIn.dValue, 
+			                                            dataIn.dValue, 
+			                                            dataIn.timestamp ) );
+		}
+		
+		// Get the set of Buckets for this Data sourceId
+		sequence<MinMaxBucket> buckets := _buckets[ sourceId ];
+
+		// Get the last bucket
+		MinMaxBucket b := buckets[ buckets.size()-1 ];
+	
+		// Check if we have filled a bucket (IE the last buckets
+		// end timestamp has been elapsed)
+		if( dataIn.timestamp >= b.bucketEndTimestamp ) then	{
+			if( _addNewBucket( dataIn, sourceId, buckets ) ) then {
+				forceUpdate := true;
+			}
+		} else {
+			// Update the existing last buckets min/max values
+			b.minValue := decimal.min( dataIn.dValue, b.minValue );
+			b.maxValue := decimal.max( dataIn.dValue, b.maxValue );
+		}
+		
+		MinMaxBucket overallBucket := _overallMinMax[ sourceId ];	
+	
+		// Check if we need to publish a new value or not
+		boolean doPublish := true;
+		
+		// Check if we want to publish on every data event or when min/max changed
+		if( not forceUpdate ) then {
+			// If the data value is within the current min and max values 
+			// then we don't want to publish this update
+			if( ( dataIn.dValue > overallBucket.minValue )
+			and ( dataIn.dValue < overallBucket.maxValue ) ) then {
+				doPublish := false;
+			}
+		}
+		
+		//check which value has changed. 
+		if( ( dataIn.dValue >= overallBucket.maxValue )
+		or  ( dataIn.dValue <= overallBucket.minValue ) ) then {
+			// Cache the value that changed the min\max value
+			_changeValue := dataIn.dValue;
+		}
+		// Update the overall min/max value based on the new data
+		overallBucket.minValue := decimal.min( overallBucket.minValue, dataIn.dValue );
+		overallBucket.maxValue := decimal.max( overallBucket.maxValue, dataIn.dValue );
+
+		if( doPublish or forceUpdate ) then {
+			// Create a new Data event to publish
+			Data dataOut := new Data;
+			dataOut.streamName := _outputDataName;
+			dataOut.type       := DataConstants.COMPUTED;
+			dataOut.sourceId   := dataIn.sourceId;
+			dataOut.timestamp  := dataIn.timestamp;
+			//add either min or max value to dValue.
+			dataOut.dValue     := _changeValue;			
+			dataOut.xValue     := overallBucket.minValue.toFloat();
+			dataOut.yValue     := overallBucket.maxValue.toFloat();
+	
+			// Send the event to the output channel
+			_analyticObject.sendData( dataOut );
+		}
+	}
+	
+	/** Updates the overall minMax from the constiuent buckets
+	 * @private
+	 */
+	action _updateOverallMinMaxFromBuckets(string sourceId, sequence<MinMaxBucket> buckets) {
+		// Create a new the overall bucket with max ranges 
+		// (decimal.MIN returns the smallest number, not the largest negative number)
+		MinMaxBucket overallBucket := MinMaxBucket( decimal.MAX, -decimal.MAX, 0.0d ); 
+		MinMaxBucket b;
+		for b in buckets {
+			//save MIN/MAX change for overallBucket
+			if( b.maxValue >= overallBucket.maxValue ) then {
+				// Cache the value the changed MAX value
+				_changeValue := b.maxValue;
+			} else if( b.minValue <= overallBucket.minValue ) then {
+				// Cache the value the changed MIN value
+				_changeValue := b.minValue;
+			}
+			
+			overallBucket.minValue := decimal.min( overallBucket.minValue, b.minValue );
+			overallBucket.maxValue := decimal.max( overallBucket.maxValue, b.maxValue );
+		}
+		_overallMinMax.add( sourceId, overallBucket );
+	}
+		
+	/** This helper action adds new buckets to the sequence, removing old
+	 *  ones as required.  It also updates the overall values.
+	 *  @private
+	 */
+	action _addNewBucket( Data dataIn, string sourceId, sequence<MinMaxBucket> buckets ) returns boolean {
+		
+		boolean forceUpdate := false;
+		// If we have exceeded the max bucket size
+		if( buckets.size() = _bucketCount ) then {
+		
+			// Remove the oldest bucket
+			buckets.remove( 0 );
+
+			_updateOverallMinMaxFromBuckets(sourceId, buckets);
+			
+			// Return the fact that we've recalculated the overall values
+			forceUpdate := true;
+		}
+
+		// Add a new bucket to the sequence
+		buckets.append( MinMaxBucket( dataIn.dValue,
+		                              dataIn.dValue,
+		                              buckets[buckets.size() - 1].bucketEndTimestamp + _bucketTimeWindow ) );
+		return forceUpdate;
+	}	
+	
+	/**
+ 	 *  Optional action to reset the state of the analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @private
+	 */
+	action reset() {
+		_buckets.clear();
+		_overallMinMax.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the MinMax Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternMinMaxChannel {
+	event StayAlive {}
+	
+	action onload() {
+		string discard := MinMax.NAME.intern();
+		discard := MinMax.TIME_WINDOW.intern();
+		discard := MinMax.BUCKET_COUNT.intern();
+		discard := MinMax.BY_SOURCEID.intern();
+		discard := MinMax.CONST_INTERNAL_ALL_SOURCES.intern();
+		on all StayAlive() {}
+	}
+}

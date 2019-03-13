@@ -1,0 +1,727 @@
+//*****************************************************************************
+// Title: Mode Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.streaming_calculations;
+
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Constants;
+
+/**Event used to keep top 10 Modes from each bucket
+* @private
+**/
+event TopValuesInBucket
+{
+	/**total count of values in dictionary to keep as cache
+	 * @private
+	**/
+	integer tCount;
+
+	/**Keep track of smallest count in cache
+	 * @private
+	**/
+	integer sKey;
+	
+	/**Cache of top 10 mode for a bucket.
+	 * @private
+	**/
+	dictionary<integer/*count*/, sequence<string>/*values*/>topCache;
+	
+	integer maxTotalCount;
+	
+	/**Init action.
+	*@private
+	**/
+	action init(integer mTotalCount)
+	{
+		maxTotalCount := mTotalCount;
+		tCount := 0;
+		topCache := new dictionary<integer, sequence<string> >;
+	}
+	
+	/**Action to add or update value to cache.
+	*@private
+	**/
+	action addOrUpdate(string value, integer count)
+	{
+		boolean found := false;
+		if tCount < maxTotalCount or sKey <= count then
+		{
+			//check if value exists
+			integer _key;
+			for _key in topCache.keys()
+			{
+				string _value;
+				for _value in topCache[_key]
+				{
+					if _value = value then
+					{
+						//Now remove the value from key --> sequence as its count (key) has changed. Add or update it to new key
+						//remove value from sequence
+						topCache[_key].remove(topCache[_key].indexOf(_value));
+						//if it was only value in sequence then remove key entry from dictionary
+						if topCache[_key].size() = 0 then
+						{
+							topCache.remove(_key);
+						}
+						//now add the value to new key
+						//new key for value will be _key + 1. Check if new key already exist in dictionary.
+						//if yes then add value to sequence
+						if(topCache.hasKey(_key+1)) then
+						{
+							topCache[_key+1].append(_value);
+						} else
+						{
+							topCache.add(_key+1, [_value]);
+						}
+						
+						found := true;
+						//stop further search
+						break;
+					}
+				}
+				
+				if found then
+				{
+					break;
+				}
+			}
+			//value is not in TopCache, add it with count as key
+			if not found then
+			{
+				if topCache.hasKey(count) then
+				{
+					//count already exist as a key, update sequence
+					topCache[count].append(value);
+				} else
+				{
+					//add new entry to dictionary
+					topCache.add(count, [value]);
+				}
+				
+				if tCount < maxTotalCount then
+				{
+					//update total count
+					tCount := tCount + 1;
+				} else 
+				{
+					//remove oldest sequence value of smallest key
+					topCache[topCache.keys()[0]].remove(0);
+					//if sequence is empty then remove entry from dictionary
+					if topCache[topCache.keys()[0]].size() = 0 then
+					{
+						topCache.remove(topCache.keys()[0]);
+					}
+				}
+				//update smallest count
+				sKey := topCache.keys()[0];
+			}
+		}
+	}
+}
+
+/**This event is used as a bucket to store Mode data
+* @private
+**/
+event ModeBucket
+{
+	/**end timestamp of bucket
+	 * @private
+	**/
+	decimal bucketEndTimestamp;
+	
+	integer maxCacheCount;
+	/**Data recieved within time bucket
+	 * @private
+	**/
+	dictionary <string/*sValue*/, integer/*count*/> sValues;
+	//Cache of top 10 values in the bucket
+	TopValuesInBucket _tvBucket;
+	
+	//Init action
+	action init(decimal timestamp, integer count)
+	{
+		maxCacheCount := count;
+		bucketEndTimestamp := timestamp;
+		_tvBucket := new TopValuesInBucket;
+		_tvBucket.init(maxCacheCount);
+	}
+	
+	//Action to add or update data to sValue cache
+	action addOrUpdateValuesToDictionary(string value)
+	{
+		if sValues.hasKey(value) then
+		{
+			sValues[value] := sValues[value] + 1;
+		} else
+		{
+			sValues.add(value, 1);
+		}
+		_tvBucket.addOrUpdate(value, sValues[value]);
+	} 
+	
+	//Merge previous buckets (in current timewindow) Top cache values to sValue dictionary of this bucket
+	action populateDictionaryWithTopValues(TopValuesInBucket tvBucket)
+	{
+		integer key;
+		for key in tvBucket.topCache.keys()
+		{
+			string val;
+			for val in tvBucket.topCache[key]
+			{
+				if not sValues.hasKey(val) then 
+				{
+					sValues.add(val, key);
+				} else
+				{
+					sValues[val] := sValues[val]+key;
+				}
+					
+			}
+		}
+	}
+}
+
+
+
+/* @AnalyticDefinition
+{
+	"name": "Mode",
+	"description": "Finds the mode for the input data.",
+	"group": "Streaming Calculations",
+	"documentation": "com/industry/analytics/streaming_calculations/Mode.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel receiving the data used to calculate the mode",
+            "dataProperties": ["dValue"] 
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Mode",
+			"description": "The channel on which to output mode data",
+            "dataProperties": ["dValue"] 
+        }
+	],
+	"properties": [
+		{
+			"name": "bucketCount",
+			"description": "Defines the number of buckets to use in the mode calculation",
+			"type": "integer",
+            "defaultValue": 5,
+            "optional": true,
+            "validator": "function(value) { return value >= 2 || 'Value must be greater than or equal to 2' }"
+		},{
+			"name": "timeWindow",
+			"description": "Defines the time window (in seconds) to use in the mode calculation",
+			"type": "decimal",
+            "validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0.0' }",
+			"postfix": "(Seconds)"
+		},{
+			"name": "decimalPrecision",
+			"description": "Defines the number digits after decimal point to use in mode calculation.",
+			"type": "integer",
+			"defaultValue": 2,
+			"optional": true,
+			"validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0' }"
+		},{
+			"name": "dataAttribute",
+			"description": "The configuration parameter name that defines the Data attribute to use in the mode calculation.",
+			"type": "string",
+			"defaultValue": "dValue",
+			"validValues": ["dValue", "sValue", "xValue", "yValue", "zValue", "type"],
+			"optional": true
+		},{
+			"name": "bucketCacheCount",
+			"description": "Defines the number of data points to save in bucket cache.",
+			"type": "integer",
+			"defaultValue": 10,
+			"optional": true,
+			"validator": "function(value) { return value >= 1 || 'Value must be greater than or equal to 1' }"
+		},{
+			"name": "bySourceId",
+			"description": "Defines whether or not the mode calculations will be partitioned by the sourceId.",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+
+/**
+*  The Mode Analytic finds the mode of the data passing through.
+*  This is achieved by setting up a defined number of buckets (default 5) 
+*  which cover a defined time window. Mode is output end of each bucket.
+*  The mode is calculated at the point a Data is received which has a timestamp 
+*  beyond the time window covered by the current bucket. Once that has 
+*  been done, the oldest bucket is discarded and the triggering Data 
+*  becomes the first data point in the new bucket. If the time window 
+*  is set to zero, then this calculation is done for every data point 
+*  received, although due to the algorithm in place the mode produced
+*  is one point behind the incoming data. It there are two mode values 
+*  then the one smaller is returned as mode.
+* 
+*  <dl><dt><b>Input Data events:</b></dt>
+*  <dd>Only a single input Data stream name must be provided.</dd>
+*  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+*  </dl>
+*  <dl><dt><b>Output Data events:</b></dt>
+*  <dd>Only a single output Data stream name must be provided.</dd>
+*  </dl>
+*  <dl><dt><b>Params:</b></dt>
+*  <dd>
+*  <table border="1" style="border-collapse: collapse;width:100%">
+*  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+*  <tr><td><b>bucketCount</b></td><td>Defines the number of buckets to use in the mode calculation.</td>
+*      <td>Must be <font face="courier" size="-1"> >= 2</font></td><td>integer</td><td>False</td><td><font face="courier" size="-1">5</font></td></tr>
+*  <tr><td><b>timeWindow</b></td><td>Defines the time window (in seconds) to use in the mode calculation.</td>
+*      <td>Must be <font face="courier" size="-1"> >= 0.0d</font></td><td>decimal</td><td>True</td><td></td></tr>
+*  <tr><td><b>decimalPrecision</b></td><td>Defines the number of decimal points to use in the mode calculation.</td>
+*      <td>Must be <font face="courier" size="-1"> >= 0</font></td><td>integer</td><td>False</td><td><font face="courier" size="-1">2</font></td></tr>
+*  <tr><td><b>bySourceId</b></td><td>Defines whether or not the mode calculations will be partitioned by the sourceId.</td>
+*      <td><font face="courier" size="-1">True or False</font></td><td>boolean</td><td>False</td><td><font face="courier" size="-1">True</font></td></tr>
+*  <tr><td><b>dataAttribute</b></td><td>The configuration parameter name that defines the Data attribute to use in the mode calculation.</td>
+*      <td>Non empty string</td><td>String</td><td>False</td><td><font face="courier" size="-1">dValue</font></td></tr>
+*  <tr><td><b>bucketCacheCount</b></td><td>Defines the number of data points to save in bucket cache.</td>
+*      <td>Must be <font face="courier" size="-1"> >= 1</font></td><td>integer</td><td>False</td><td><font face="courier" size="-1">10</font></td></tr>
+*  </table></dd>
+*  </dl>
+*  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+//Define a Mode Analytic which takes Data events on the channel "Input1"  
+//and calculates the mode value over a 50 second timewindow with default bucketCount, 
+//bySourceId, decimalPrecision and dataAttribute parameters. It publishes
+//a Data event with the calculated mode value at the end of bucket on the output channel "Output1".   
+send com.industry.analytics.Analytic("Mode", ["Input1"], ["Output1"], {"timeWindow":"50.0"} ) to "";
+
+//Define a Mode Analytic which takes Data events on the channel "Input"  
+//and calculates the mode value over a 50 second timewindow using 6 "time buckets" 
+//to give a higher precision. It reads Data attribute xValue with decimal precision of 3 digits
+//for calculating mode. 
+//It publishes a Data event with the calculated mode value on the output channel "Output" at end of every bucket.   
+send com.industry.analytics.Analytic("Mode", ["Input"], ["Output"], {"timeWindow" : "50.0", "bucketCount":"6", "dataAttribute":"xValue", "decimalPrecision":"3"})
+</code></dd>
+*</dl>
+*/
+event Mode
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Mode";
+	/** This constant defines the configuration parameter name
+	 *  that defines the number of points to use in the mode calculation */
+	constant string BUCKET_COUNT := "bucketCount";
+	/** This constant defines the configuration parameter name
+	 *  that defines the time window (in seconds) to use in the mode calculation */
+	constant string TIME_WINDOW := "timeWindow";
+	/** This constant defines the configuration parameter name
+	 *  that defines the decimal precision to use in the mode calculation (in case of floating/decimal type) */
+	constant string DECIMAL_PRECISION := "decimalPrecision";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the mode calculations will be 
+	 *  partitioned by the sourceId */
+	constant string BY_SOURCE_ID := "bySourceId";
+	/** This constant defines the configuration parameter name
+	 *  that defines the Data attribute to use in the mode calculation
+	 *  Data taaribute can be dValue, sValue, xValue, yValue or zValue.*/
+	constant string DATA_ATTRIBUTE := "dataAttribute";
+	/** This constant defines the configuration parameter name
+	 *  that defines the count of unique Data events values to keep in a bucket as cache
+	 *  which then will be used for overall mode calculation inside timewindow.*/
+	constant string BUCKET_CACHE_COUNT := "bucketCacheCount";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	/** Local cached input Data names
+	 *  @private */
+	string _inputDataName;
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	/** Local cached bucketCount param
+	 *  @private */
+	integer _bucketCount;
+	/** Local cached TimeWindow param
+	 *  @private */
+	decimal _bucketTimeWindow;
+	
+	/** Local cached decimal precision param
+	 *  @private */
+	integer _decimalPrecision;
+	
+	/** Local cached bySourceId param
+	 *  @private */
+	boolean _bySourceId;
+	
+	/** Local cached dataAttribute param
+	 *  @private */
+	string _dataAttribute;
+	
+	/** Local cached bucketCacheCount param
+	 *  @private */
+	integer _bucketCacheCount;
+	
+	/** Local cached value for the last bucketCount value
+	 *  @private */
+	integer _lastBucket;
+	
+	/** Local cached to keep data inside a timewindow for each source id.
+	 *  @private */
+	dictionary<string/*sourceId*/, sequence<ModeBucket> > _buckets;
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+	/** Constant definind Data attribute dValue
+	 *  @private */
+	constant string D_VALUE := "dValue";
+	/** Constant definind Data attribute sValue
+	 *  @private */
+	constant string S_VALUE := "sValue";
+	/** Constant definind Data attribute xValue
+	 *  @private */
+	constant string X_VALUE := "xValue";
+	/** Constant definind Data attribute yValue
+	 *  @private */
+	constant string Y_VALUE := "yValue";
+	/** Constant definind Data attribute zValue
+	 *  @private */
+	constant string Z_VALUE := "zValue";
+	/** Constant definind Data attribute type
+	 *  @private */
+	constant string TYPE := "type";
+	
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+ *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	
+	action init(Analytic config,
+	            action<boolean, AnalyticInterface> initComplete)
+	{
+		if not _validateConfiguration(config) then
+		{
+			initComplete(false, new AnalyticInterface);
+			return;
+		}
+		
+		_buckets := new dictionary<string, sequence<ModeBucket> >;
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init(config,
+		                      processData,
+		                      reset,
+		                      initComplete);
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration(Analytic config) returns boolean
+	{
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ BUCKET_COUNT, TIME_WINDOW, DECIMAL_PRECISION, BY_SOURCE_ID, DATA_ATTRIBUTE, BUCKET_CACHE_COUNT ],
+		                                         [ Constants.INTEGER, Constants.DECIMAL, Constants.INTEGER, Constants.BOOLEAN, Constants.STRING, Constants.INTEGER ], 
+		                                         [ false, true, false, false, false, false ] );
+		
+		if( result ) then
+		{
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+			
+			//read bucketCount param
+			_bucketCount := config.getOrInteger(BUCKET_COUNT, 5);
+			//check if value is >=2
+			if _bucketCount < 2 then
+			{
+				log "Parameter "+BUCKET_COUNT+" must be >= 2. Specified value is "+_bucketCount.toString() at ERROR;
+				result := false;
+			} else
+			{
+				_lastBucket := _bucketCount - 1;
+			}
+			
+			// Read bucketTimeWindow param
+			decimal _timeWindow := config.getDecimal(TIME_WINDOW);
+			
+			if _timeWindow <= 0.0d then
+			{
+				log "Parameter "+TIME_WINDOW+" must be >= 0.0. Specified value is "+_timeWindow.toString() at ERROR;
+				result := false;
+			} else {
+				_bucketTimeWindow := _timeWindow / _bucketCount.toDecimal();
+			}
+			
+			//read decimalPrecision. default is 2 
+			_decimalPrecision := config.getOrInteger(DECIMAL_PRECISION, 2);
+			
+			if _decimalPrecision < 0 then
+			{
+				//decimal precision should be positive number
+				log "Parameter "+DECIMAL_PRECISION+" must be > 0. Specified value is "+_decimalPrecision.toString() at ERROR;
+				result := false;
+			}
+			
+			//read bySourceId param. Default is true
+			_bySourceId := config.getOrBoolean(BY_SOURCE_ID, true);
+			
+			//read dataAttribute param. Default value is dValue
+			_dataAttribute := config.getOrString(DATA_ATTRIBUTE, D_VALUE.toLower());
+			
+			if not (_dataAttribute.toLower() = D_VALUE.toLower()
+			        or _dataAttribute.toLower() = S_VALUE.toLower() 
+			        or _dataAttribute.toLower() = X_VALUE.toLower() 
+			        or _dataAttribute.toLower() = Y_VALUE.toLower()
+			        or _dataAttribute.toLower() = Z_VALUE.toLower()
+			        or _dataAttribute.toLower() = TYPE.toLower()) then
+			{
+				log "Parameter "+DATA_ATTRIBUTE+" must be one of the following "+
+				D_VALUE+", "+S_VALUE+", "+X_VALUE+", "+Y_VALUE+", "+Z_VALUE+" or "+TYPE+". Specified value is "+_dataAttribute at ERROR;
+				result := false;
+			}
+			
+			//read _bucketCacheCount param, default value is 10
+			_bucketCacheCount := config.getOrInteger(BUCKET_CACHE_COUNT, 10);
+			
+			//check for values less than 1
+			if(_bucketCacheCount < 1) then
+			{
+				//bucketCacheCount should be > 1
+				log "Parameter "+BUCKET_CACHE_COUNT+" must be >= 1. Specified value is "+_bucketCacheCount.toString() at ERROR;
+				result := false;
+			}
+			
+		} else
+		{
+			result := false;
+		}
+		
+		return result;
+		
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	
+	action processData(Data dataIn)
+	{
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		 //If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		//check if a bucket for sourceId exists
+		if not _buckets.hasKey(sourceId)
+		{
+			//create a new bucket for sourceId
+			ModeBucket bucket := new ModeBucket;
+			//bucket end timestamp will be current Data event timestamp + bucket time window
+			bucket.init(dataIn.timestamp + _bucketTimeWindow, _bucketCacheCount);
+			//bucket.bucketEndTimestamp := dataIn.timestamp + _bucketTimeWindow;
+			//add values to bucket
+			addOrUpdateValuesToDictionary(dataIn, bucket);
+			
+			sequence<ModeBucket> bs := [bucket];
+			
+			_buckets.add(sourceId, bs);
+			
+		} else 
+		{
+			//bucket for sourceId already exists
+			//read buckets for a sourceId
+			sequence<ModeBucket> buckets := _buckets[sourceId];
+			//read latest bucket for a sourceId
+			ModeBucket b := buckets[buckets.size() - 1];
+			
+			//check if most recent bucket is full or not
+			if(dataIn.timestamp >= b.bucketEndTimestamp) then 
+			{
+				//If most recent bucket is full then calculate mode and send to output channel
+				calculateAndSendMode(dataIn, buckets);
+			} else
+			{
+				//add or update values to bucket
+				addOrUpdateValuesToDictionary(dataIn, b);
+			}
+		}
+
+	}
+	
+	/**This function calculates the mode from buckets and
+	* create a new Data event and pass onto output channel
+	* @private
+	*/
+	action calculateAndSendMode(Data dataIn, sequence<ModeBucket> buckets)
+	{
+		//code to merge all top cache (except current) to current bucket 
+		//merge all top cache (except current) to current bucket data cache
+		integer i := 0;
+		while i < buckets.size() -1
+		{
+			buckets[buckets.size() - 1].populateDictionaryWithTopValues(buckets[i]._tvBucket);
+			i := i + 1;
+		}
+		//read key with highest value from ModeBucket sValue
+		sequence<integer> modSeq := buckets[buckets.size() - 1].sValues.values();
+		modSeq.sort();
+		integer maxCount := modSeq[modSeq.size() - 1];
+		//find key with max value
+		string sMode := "";
+		for sMode in buckets[buckets.size() - 1].sValues.keys()
+		{
+			if buckets[buckets.size() - 1].sValues[sMode] = maxCount then
+			{
+				break;
+			}
+		}
+		
+		//create output Data event
+		Data dataOut := new Data;
+		dataOut.streamName := _outputDataName;
+		dataOut.type       := DataConstants.COMPUTED;
+		dataOut.sourceId   := dataIn.sourceId;
+		dataOut.timestamp  := buckets[buckets.size() - 1].bucketEndTimestamp;
+		if(_dataAttribute.toLower() = D_VALUE.toLower()) then
+		{
+			dataOut.dValue     := sMode.toDecimal();
+		} else if (_dataAttribute.toLower() = S_VALUE.toLower())then
+		{
+			dataOut.sValue     := sMode;
+		} else if (_dataAttribute.toLower() = X_VALUE.toLower())then
+		{
+			dataOut.xValue     := sMode.toFloat();
+		} else if (_dataAttribute.toLower() = Y_VALUE.toLower())then
+		{
+			dataOut.yValue     := sMode.toFloat();
+		}else if (_dataAttribute.toLower() = Z_VALUE.toLower())then
+		{
+			dataOut.zValue     := sMode.toFloat();
+		}else 
+		{
+			dataOut.type     := sMode;
+		}
+		
+		_analyticObject.sendData(dataOut);
+		
+		//remove old bucket
+		if buckets.size() = _bucketCount then
+		{
+			buckets.remove(0);
+		}
+		
+		//create a new bucket and add data
+		ModeBucket mbucket := new ModeBucket;
+		mbucket.init(dataIn.timestamp + _bucketTimeWindow, _bucketCacheCount);
+
+		addOrUpdateValuesToDictionary(dataIn, mbucket);
+		
+		buckets.append(mbucket);
+	}
+	
+	/** Action to add Data attribute value to ModeBucket
+	 *  @private */
+	action addOrUpdateValuesToDictionary(Data dataIn, ModeBucket bucket)
+	{
+		string value;
+		if(_dataAttribute.toLower() = D_VALUE.toLower()) then
+		{
+			value := dataIn.dValue.formatFixed(_decimalPrecision);
+			
+		} else if (_dataAttribute.toLower() = S_VALUE.toLower())then
+		{
+			value := dataIn.sValue;
+		} else if (_dataAttribute.toLower() = X_VALUE.toLower())then
+		{
+			value := dataIn.xValue.formatFixed(_decimalPrecision);
+		} else if (_dataAttribute.toLower() = Y_VALUE.toLower())then
+		{
+			value := dataIn.yValue.formatFixed(_decimalPrecision);
+		}else if (_dataAttribute.toLower() = Z_VALUE.toLower())then
+		{
+			value := dataIn.zValue.formatFixed(_decimalPrecision);
+		}else 
+		{
+			value := dataIn.type;
+		}
+		
+		bucket.addOrUpdateValuesToDictionary(value);
+	}
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <code>processData</code>
+	*  action on the <code>com.industry.analytics.AnalyticInterface</code> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset()
+	{
+		_buckets.clear();
+	}
+	
+}

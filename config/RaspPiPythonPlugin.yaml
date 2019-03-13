@@ -1,0 +1,4 @@
+eplPlugins:
+    RaspberryPiPythonPlugin:
+        pythonFile: ${PARENT_DIR}/../python/RaspberryPiPythonPlugin.py
+        class: RaspberryPiPythonPlugin

@@ -1,0 +1,103 @@
+//*****************************************************************************
+// Title:         DataViewReflector
+// Description:   Reflects Data events from the main context to the context of their name.
+//				  Required in certain circumstances, such as with JMS when all events
+//				  arrive on the main context.
+//				  The assumption for this monitor is that all Data events on the
+//				  main context will need reflecting, as normally they would
+//				  be expected to be sent to their correct channel.
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.dataview.DataViewAllItemsDeleted;
+using com.apama.dataview.DataViewDefinition;
+using com.apama.dataview.DataViewDefinitionDeleted;
+using com.apama.dataview.DataViewException;
+using com.apama.dataview.DataViewFieldLookup;
+using com.apama.dataview.DataViewItem;
+using com.apama.dataview.DataViewItemDeleted;
+using com.apama.dataview.DataViewItemException;
+
+
+/** 
+ *  This monitor reflects Data events from the main context 
+ *  to the DATAVIEW_CHANNEL. This is required for the DataViewer analytic.
+ * 
+ *  This overcomes the limitation of the DataView Service bundle's
+ *  limitation of only routing the response events on the main context. 
+ */
+monitor DataViewReflector
+{
+	constant string DATAVIEW_CHANNEL := "DATAVIEW_CHANNEL";
+
+	/** @private */
+	action onload()
+	{
+		string discard := DATAVIEW_CHANNEL.intern();
+		
+		// Unfortunately DataView response messages are only routed on the main context, so we
+		// need a reflector here on the main context.
+		DataViewAllItemsDeleted dvaid;
+		on all DataViewAllItemsDeleted() :dvaid
+		{
+			send dvaid to DATAVIEW_CHANNEL;
+		}
+		
+		DataViewDefinition dvd;
+		on all DataViewDefinition() :dvd
+		{
+			send dvd to DATAVIEW_CHANNEL;
+		}
+
+		DataViewDefinitionDeleted dvdd;
+		on all DataViewDefinitionDeleted() :dvdd
+		{
+			send dvdd to DATAVIEW_CHANNEL;
+		}
+
+		DataViewFieldLookup dvfl;
+		on all DataViewFieldLookup() :dvfl
+		{
+			send dvfl to DATAVIEW_CHANNEL;
+		}
+
+		DataViewException dve;
+		on all DataViewException() :dve
+		{
+			send dve to DATAVIEW_CHANNEL;
+		}
+
+		DataViewItem dvi;
+		on all DataViewItem() :dvi
+		{
+			send dvi to DATAVIEW_CHANNEL;
+		}
+
+		DataViewItemDeleted dvid;
+		on all DataViewItemDeleted() :dvid
+		{
+			send dvid to DATAVIEW_CHANNEL;
+		}
+
+		DataViewItemException dvie;
+		on all DataViewItemException() :dvie
+		{
+			send dvie to DATAVIEW_CHANNEL;
+		}
+	}
+}

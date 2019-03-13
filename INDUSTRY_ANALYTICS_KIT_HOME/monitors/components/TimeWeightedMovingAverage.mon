@@ -1,0 +1,181 @@
+//*****************************************************************************
+// Title: TimeWeightedMovingAverage
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+
+/** 
+ *  This event handles the storage and calculations
+ *  for a time weighted moving average.
+ *  
+ *  The following formulas are implemented: 
+ * 
+ *  Standard formulation:
+ *  ma_n = a * x_n + (1 - a) * ma_n-1
+ *       = ma_n-1 + a * (x_n - ma_n-1)
+ *  a = (1 - e^-u)
+ *  u = (t_n - t_n-1) / T
+ *
+ *  Re-arrange for efficiency:
+ *  ma_n = (1 - a) * x_n + a * ma_n-1
+ *       = x_n + a * (ma_n-1 - x_n)
+ *  a = e^-u
+ *  u = (t_n - t_n-1) / T
+ *
+ *  Note: If there are multiple values (x_n) for a particular timestamp (t_n) then the average is used
+ *  Note: If t_n < t_n-1 then the value is ignored
+ * 
+ */
+event TimeWeightedMovingAverage {
+	/** Current Moving average.
+	 *  @private */
+	decimal _eMa;
+	/** Moving average for the previous timestamp.
+	 *  @private */
+	optional<decimal> _eMa_tn_1;
+	/** The previous timestamp.
+	 *  @private */
+	decimal _tn_1;
+	/** The current timestamp.
+	 *  @private */
+	decimal _tn;
+	/** The sum of the values at the current timestamp.
+	 *  @private */
+	decimal _sum_tn;
+	/** The count of the values at the current timestamp.
+	 *  @private */
+	decimal _count_tn;
+	
+	/** Time window to be used for the time weighting.
+	 *  @private */
+	decimal _timeWindow;
+	
+	/** The value of a, an intermediate value in the above formulas.
+	 *  Required by subsequent calculations, such as the variance.
+	 *  @private */
+	decimal _a;
+
+
+	/** 
+	 *  Call this action immediately after creating a new instance of this event.
+	 *  Initialises the time weighted moving average.
+	 *  
+	 *  @param	value	    The first decimal value in the set of data to be averaged.
+	 *  @param	timestamp	The decimal timestamp when the first value was generated.
+	 *	@param	timeWindow	The time window for the weight: T in the above formulas.
+	 */
+	action init( decimal value, decimal timestamp, decimal timeWindow ) {
+		_eMa := value;
+		_sum_tn := value;
+		_count_tn := 1.0d;
+		_tn := timestamp;
+		_timeWindow := timeWindow;
+	}
+
+
+	/** 
+	 *  Returns the intermediate value a from the above formulas. Required by the
+	 *  variance calculation, for example.
+	 *  
+	 *  @returns Decimal value of a.
+	 */
+	action a() returns decimal {
+		return _a;
+	}
+
+
+	/** 
+	 *  Returns the current moving average.
+	 *  
+	 *  @returns Moving average as a decimal value.
+	 */
+	action eMa() returns decimal {
+		return _eMa;
+	}
+	
+	
+	/**
+	 * Get the moving average for the previous timestamp (This may differ from the previously calculated eMa if there were multiple values for the same tiemstamp)
+	 * 
+	 * @returns Moving average as a decimal value.
+	 */
+	action previousEMA() returns optional<decimal> {
+		return _eMa_tn_1;
+	}
+	
+	/**
+	 * Get the timestamp of the most recent update to the average
+	 *
+	 * @returns Timestamp as a decimal
+	 */
+	action currentTimestamp() returns decimal {
+		return _tn;
+	}
+	
+	/**
+	 * Get the sum of the values at the current timestamp (Used by variance calculation)
+	 *
+	 * @returns The sum of the values as a decimal
+	 */
+	action currentSum() returns decimal {
+		return _sum_tn;
+	}
+	
+	/**
+	 * Get the count of the values at the current timestamp (Used by variance calculation)
+	 *
+	 * @returns The count of the values as a decimal
+	 */
+	action currentCount() returns decimal {
+		return _count_tn;
+	}
+
+	/** 
+	 *  Updates the moving average with a new data point.
+	 *  
+	 *  @param	value	    The decimal value to be added to the moving average.
+	 *  @param	timestamp	The decimal timestamp when the value was generated.
+	 */
+	action update( decimal value, decimal timestamp ) {
+		if (timestamp < _tn) {
+			log "Unable to update average for timestamp in the past" at WARN;
+			return;
+		}
+		if (timestamp > _tn) {
+			_eMa_tn_1 := _eMa;
+			_tn_1 := _tn;
+			_sum_tn := 0.0d;
+			_count_tn := 0.0d;
+		}
+		
+		_sum_tn := _sum_tn + value;
+		_count_tn := _count_tn + 1.0d;
+		_tn := timestamp;
+		
+		decimal avg_tn := _sum_tn / _count_tn;
+		
+		ifpresent _eMa_tn_1 {
+			decimal negU := (_tn_1 - _tn) / _timeWindow;
+			_a := decimal.E.pow(negU);
+			_eMa := avg_tn + _a * (_eMa_tn_1 - avg_tn);
+		} else {
+			// If there's no previous eMa then the current eMa is the average
+			_eMa := avg_tn;
+		}
+	}
+}

@@ -1,0 +1,751 @@
+//*****************************************************************************
+// Title: Suppressor Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "Suppressor",
+	"description": "Suppress events after a triggering event.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Suppressor.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to suppress",
+			"dataProperties": ["params"]
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Suppressed",
+			"description": "Suppressed data channel"
+		}
+	],
+	"properties": [
+		{
+			"name": "triggerParam",
+			"description": "A param to identify when to start suppressing the output events.",
+			"type": "string",
+			"validator": "function(value) { return value.length > 0 || 'Must have a value' }"
+		},{
+			"name": "timeWindow",
+			"description": "How long to suppress events for.",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Must be greater than 0' }",
+			"defaultValue": 60.0,
+			"optional": true,
+			"postfix": "(Seconds)"
+		},{
+			"name": "triggerParamValue",
+			"description": "A paramValue to identify when to start suppressing the output events. If empty or undefined then any value will trigger",
+			"type": "string",
+			"defaultValue": "",
+			"optional": true
+		},{
+			"name": "triggerExtension",
+			"description": "Extend the suppression time if another triggering event arrives while the output is suppressed",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true
+		},{
+			"name": "actionParam",
+			"description": "A param to identify which events should be suppressed (Defaults to the triggerParam)",
+			"type": "string",
+			"defaultValue": "Same as triggerParam",
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "actionParamValue",
+			"description": "Only suppress events with this actionParam value",
+			"type": "string",
+			"defaultValue": "",
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "resetParam",
+			"description": "An event's param name that immediately unsuppresses the output",
+			"type": "string",
+			"defaultValue": "",
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "resetParamValue",
+			"description": "An event's resetParam value that immediately unsuppresses the output",
+			"type": "string",
+			"defaultValue": "",
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "suppressionType",
+			"description": "Switch between different modes of suppression. Inverting the effect of the trigger.",
+			"type": "string",
+			"defaultValue": "startUnsuppressed",
+			"validValues": ["startUnsuppressed", "startSuppressed"],
+			"optional": true
+		},{
+			"name": "bySourceId",
+			"description": "If defined, the suppression of Data events is partitioned by the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced": true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Suppressor Analytic will suppress events from the defined input stream 
+ *  from appearing on the output stream name for a set duration following a 
+ *  trigger event. The trigger event will be passed through regardless 
+ *  allowing the prevention of repeated warnings, for example. 
+ * 
+ *  The trigger event is based upon a defined parameter, the events acted
+ *  upon may use the same parameter or another. It is also possible to 
+ *  reset the suppressing by the use of an event with a different parameter. 
+ *  It is also possible to independently set whether suppressing should happen
+ *  just for the source in the trigger event or for all sources received, and 
+ *  whether a reset should just apply to its source or reset all sources 
+ *  being actioned. It is also possible to set whether a new trigger event
+ *  received before the end of a suppressing window should restart the duration 
+ *  timer or just be ignored.
+ * 
+ *  A special case exists for the parameters below. If the parameter value <font face="courier" size="-1">"type"</font>
+ *  is used, then the Suppressor will look at the type member of the Data event
+ *  instead of the params dictionary. In this case the param value is mandatory
+ *  and must be one of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).
+ *
+ *  The suppressor can also be inverted so that events are suppressed until after a trigger event. See the <font face="courier" size="-1">suppressionType</font> param.
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.  All the
+ *      <font face="courier" size="-1">params</font> from the input Data are copied to the unsuppressed Data events.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>Defines the time window in seconds in which to suppress events over</td>
+ *      <td>Stringified decimal <font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">60.0d"</font></td></tr>
+ *  <tr><td><b>triggerParam</b></td><td>Defines the parameter name at which to start suppressing events on.
+ *                                      The <font face="courier" size="-1">triggerParamValue</font> parameter can also be used 
+ *                                      to trigger on a specific parameter value. If the value is set to <font face="courier" size="-1">"type"</font>,
+ *                                      then the Suppressor will look at the type member of the Data event instead of the
+ *                                      params dictionary. In this case the <font face="courier" size="-1">triggerParamValue</font> value is mandatory
+ *                                      and must be one of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).</td>
+ *      <td>Non-empty string value</td><td>String</td><td>True</td><td></td></tr>
+ *  <tr><td><b>triggerParamValue</b></td><td>Defines a specific value for the <font face="courier" size="-1">triggerParam</font> 
+ *                                           before starting to suppress events. If this configuration parameter
+ *                                           was not defined or an empty string is provided, then any values for the <font face="courier" size="-1">triggerParam</font> will
+ *                                           trigger suppressing to start. If the <font face="courier" size="-1">triggerParam</font> value is 
+ *                                           set to <font face="courier" size="-1">"type"</font>, this parameter is mandatory and must be one 
+ *                                           of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).</td>
+ *      <td></td><td>String</td><td>False</td><td><font face="courier" size="-1">""</font></td></tr>
+ *  <tr><td><b>triggerExtension</b></td><td>Defines whether or not the time window will be reset following
+ *                                          a new trigger match</td>
+ *      <td></td><td><font face="courier" size="-1">"true"</font> or <font face="courier" size="-1">"false"</font></td><td>False</td><td><font face="courier" size="-1">"false"</font></td></tr>
+ *  <tr><td><b>actionParam</b></td><td>Defines the parameter name which will cause the Data event to 
+ *                                     be suppressed once a trigger has been received. The <font face="courier" size="-1">actionParamValue</font> parameter 
+ *                                     to trigger on a specific parameter value. If the value is set to <font face="courier" size="-1">"type"</font>,
+ *                                     then the Suppressor will look at the type member of the Data event instead of the
+ *                                     params dictionary. In this case the <font face="courier" size="-1">actionParamValue</font> value is mandatory
+ *                                     and must be one of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).</td>
+ *      <td></td><td>String</td><td>False</td><td>The <font face="courier" size="-1">triggerParam</font></td></tr>
+ *  <tr><td><b>actionParamValue</b></td><td>Defines a specific value for the <font face="courier" size="-1">actionParam</font> 
+ *                                          before suppressing events. If this configuration parameter
+ *                                          was not defined or an empty string is provided, then any values for the <font face="courier" size="-1">actionParam</font> will
+ *                                          trigger suppressing to start. If the <font face="courier" size="-1">actionParam</font> value is 
+ *                                          set to <font face="courier" size="-1">"type"</font>, this parameter is mandatory and must be one 
+ *                                          of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).</td>
+ *      <td></td><td>String</td><td>False</td><td><font face="courier" size="-1">""</font></td></tr>
+ *  <tr><td><b>resetParam</b></td><td>Defines the parameter name which will cause the trigger Suppressor to be reset. 
+ *                                    The <font face="courier" size="-1">resetParamValue</font> parameter can also be used 
+ *                                    to reset the trigger on a specific parameter value. If this parameter is not defined, 
+ *                                    the trigger will never be reset. If the value is set to <font face="courier" size="-1">"type"</font>,
+ *                                    then the Suppressor will look at the type member of the Data event instead of the
+ *                                    params dictionary. In this case the <font face="courier" size="-1">resetParamValue</font> value is mandatory
+ *                                    and must be one of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).</td>
+ *      <td></td><td>String</td><td>False</td><td>""</td></tr>
+ *  <tr><td><b>resetParamValue</b></td><td>Defines a specific value for the <font face="courier" size="-1">resetParam</font> 
+ *                                         before resetting the trigger. If the <font face="courier" size="-1">resetParam</font> value is 
+ *                                         set to <font face="courier" size="-1">"type"</font>, this parameter is mandatory and must be one 
+ *                                         of <font face="courier" size="-1">'r', 'c' or 'a'</font> (raw, computed or anomaly).</td>
+ *      <td></td><td>String</td><td>False</td><td><font face="courier" size="-1">""</font></td></tr>
+ *  <tr><td><b>suppressionType</b></td><td>Switch between two different modes of suppression.<br>
+ *										   <font face="courier" size="-1">startUnsuppressed</font> - Start unsuppressed, triggering events cause supression.<br>
+ *										   <font face="courier" size="-1">startSuppressed</font> - Start suppressed, triggering events cause unsuppression.</td>
+ *      <td><font face="courier" size="-1">startUnsuppressed</font> or <font face="courier" size="-1">startSuppressed</font></td><td>String</td><td>False</td><td><font face="courier" size="-1">startUnsuppressed</font></td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the suppression of Data events is partitioned by the <font face="courier" size="-1">sourceId</font> parameter of the input data stream</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Suppressor Analytic which takes Data events on the channel "Input1"  
+// and prevents any "Computed" types of Data events from being published onto 
+// the output channel "Output1" within a 20.0 second time window. For example,
+// if you only want to publish periodic updates from a data source.
+send com.industry.analytics.Analytic("Suppressor", ["Input1"], ["Output1"], { "timeWindow":"20.0d","triggerParam":"type","triggerParamValue":DataConstants.COMPUTED } ) to "";
+
+// Define a Suppressor Analytic which takes Data events on the channel "Input1"  
+// and waits until it receives a Data event with the parameter "isTestingEnabled"
+// set to a value of "true". Once the Analytic has triggered, it prevents any 
+// "Computed" types of Data events from being published onto the output channel 
+// "Output1" within a 20.0 second time window.  For example, if you want to 
+// ignore any events being published while a device is in a "test mode".
+send com.industry.analytics.Analytic("Suppressor", ["Input1"], ["Output1"], { "timeWindow":"20.0d","triggerParam":"isTestingEnabled","triggerParamValue":"true",
+                                                                               "actionParam":"type", "actionParamValue":DataConstants.COMPUTED } ) to "";
+</code></dd>
+ *</dl>
+ */
+event Suppressor
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Suppressor";
+	
+	/** This constant defines the configuration parameter name that
+	 *  specifies the suppressing trigger parameter name. This can be
+     *  used in conjunction with the <font face="courier" size="-1">triggerParamValue</font> 
+	 *  configuration parameter to refine the trigger condition. */
+	constant string TRIGGER_PARAM := "triggerParam";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the suppressing trigger parameter value. This is
+     *  used in conjunction with the <font face="courier" size="-1">triggerParam</font> 
+	 *  configuration parameter. */
+	constant string TRIGGER_PARAM_VALUE := "triggerParamValue";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the whether or not the trigger time out will 
+	 *  be reset following a new trigger match. */
+	constant string TRIGGER_EXTENSION := "triggerExtension";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the action parameter name. This can be
+     *  used in conjunction with the <font face="courier" size="-1">actionParamValue</font> 
+	 *  configuration parameter to refine the action condition. */
+	constant string ACTION_PARAM := "actionParam";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the action parameter value. This is
+     *  used in conjunction with the <font face="courier" size="-1">actionParam</font> 
+	 *  configuration parameter to refine the action condition. */
+	constant string ACTION_PARAM_VALUE := "actionParamValue";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the trigger reset parameter name. This can be
+     *  used in conjunction with the <font face="courier" size="-1">resetParamValue</font> 
+	 *  configuration parameter to refine the trigger reset condition. */
+	constant string RESET_PARAM := "resetParam";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the trigger reset parameter value. This is
+     *  used in conjunction with the <font face="courier" size="-1">resetParam</font> 
+	 *  configuration parameter to refine the trigger reset condition. */
+	constant string RESET_PARAM_VALUE := "resetParamValue";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the time window (in seconds) that the events will be 
+	 *  suppressed for once triggered. */
+	constant string TIMEWINDOW := "timeWindow";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the suppression of Data events is 
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+	/** This constant defines the special case parameter name which 
+	 *  refers to the Data event type field. */
+	constant string TYPE := "type";
+	/** Constant for the supressionType parameter name. */
+	constant string SUPPRESSION_TYPE := "suppressionType";
+	/** A valid value for supressionType - suppresses data when triggered */
+	constant string SUPPRESSION_TYPE_START_UNSUPPRESSED := "startUnsuppressed";
+	/** A valid value for supressionType - unsuppresses data when triggered */
+	constant string SUPPRESSION_TYPE_START_SUPPRESSED := "startSuppressed";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	// State
+	/** Local cached dictionary of the active suppress timeouts, keyed by
+	 *  the sourceId.
+	 *  @private */	
+	dictionary<string /*sourceId*/, decimal /*timeout*/> _activeSourceIds;
+
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	/** Local cached value for the triggerParam configuration parameter value
+	 *  @private */
+	string _triggerParam;
+	/** Local cached value that indicates whether the triggerParamValue has been
+	 *  defined or not
+	 *  @private */
+	boolean _hasTriggerParamValue;
+	/** Local cached value for the triggerParamValue configuration parameter value
+	 *  @private */
+	string _triggerParamValue;
+	/** Local cached value for the triggerExtension configuration parameter value
+	 *  @private */
+	boolean _triggerExtension;
+	/** Local cached value for the actionParam configuration parameter value
+	 *  @private */
+	string _actionParam;
+	/** Local cached value that indicates whether the actionParamValue has been
+	 *  defined or not
+	 *  @private */
+	boolean _hasActionParamValue;
+	/** Local cached value for the actionParamValue configuration parameter value
+	 *  @private */
+	string _actionParamValue;
+	/** Local cached value for the resetParam configuration parameter value
+	 *  @private */
+	string _resetParam;
+	/** Local cached value that indicates whether the resetParamValue has been
+	 *  defined or not
+	 *  @private */
+	boolean _hasResetParamValue;
+	/** Local cached value for the resetParamValue configuration parameter value
+	 *  @private */
+	string _resetParamValue;
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId;
+	/** Local cached value for the timeWindow configuration parameter value
+	 *  @private */
+	decimal _timeWindow;
+	/** Local cached value for the suppressionType configuration parameter value
+	 *  @private */
+	string _suppressionType;
+	
+	/** The handler for active sourceIds
+	 *  suppressionType = StartUnsuppressed => NoOp
+	 *  suppressionType = StartSuppressed => SendData
+	 *  @private */
+	action<Data> _handleActive;
+	/** The handler for inactive sourceIds
+	 *  suppressionType = StartUnsuppressed => SendData
+	 *  suppressionType = StartSuppressed => NoOp
+	 *  @private */
+	action<Data> _handleInactive;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ TRIGGER_PARAM, TRIGGER_PARAM_VALUE, TRIGGER_EXTENSION,
+		      		                               ACTION_PARAM,  ACTION_PARAM_VALUE,  
+		      		                               RESET_PARAM,   RESET_PARAM_VALUE,   
+		      		                               BY_SOURCEID,   TIMEWINDOW, SUPPRESSION_TYPE ],
+		      		                             [ Constants.STRING,  Constants.STRING, Constants.BOOLEAN,
+		      		                               Constants.STRING,  Constants.STRING, 
+		      		                               Constants.STRING,  Constants.STRING, 
+		      		                               Constants.BOOLEAN, Constants.DECIMAL, Constants.STRING ],
+		      		                           	 [ false, false, false,
+		      		                           	   false, false, 
+		      		                           	   false, false, 
+		      		                           	   false, false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+
+			// Mandatory
+			_triggerParam := config.getString( TRIGGER_PARAM ).ltrim().rtrim();
+			if( _triggerParam.length() = 0 ) then {
+				log "  Param "+ TRIGGER_PARAM +" cannot be an empty string." at ERROR;
+				result := false;
+				_triggerParam := "";
+			} else if( _triggerParam.toLower() = TYPE ) then {
+				// Ensure case is lowered
+				_triggerParam := TYPE;
+			}
+			
+			// Is there a particular trigger value we need to look for?
+			_hasTriggerParamValue := config.hasParam(TRIGGER_PARAM_VALUE);
+			// If the trigger is TYPE, then a value is mandatory.
+			if( _triggerParam = TYPE and not _hasTriggerParamValue ) then {
+				log "  Param "+ TRIGGER_PARAM_VALUE +
+					" is mandatory when " + TRIGGER_PARAM +
+					" is set as '" + TYPE + "'." at ERROR;
+				result := false;
+			} else {
+				if( _hasTriggerParamValue ) then {
+					_triggerParamValue := config.getString(TRIGGER_PARAM_VALUE);
+				} else {
+					_triggerParamValue := "";
+				}
+				
+				// If trigger is TYPE, then only one of the allowed values is valid.
+				string lowerTrimmedParamValue := _triggerParamValue.toLower().ltrim().rtrim();
+				if( _triggerParam = TYPE ) then {
+					if( not lowerTrimmedParamValue = DataConstants.ANOMALY
+					and not lowerTrimmedParamValue = DataConstants.COMPUTED 
+				    and not lowerTrimmedParamValue = DataConstants.RAW ) then {
+						log "  Param "+ TRIGGER_PARAM_VALUE +
+							" for " + TRIGGER_PARAM + TYPE +
+							" can only be one of a, c, or r" at ERROR;
+						result := false;
+					} else {
+						// Force the known value type to be lowercase and trimmed
+						_triggerParamValue := lowerTrimmedParamValue;
+					}
+				}
+			}
+			
+			// Check if the trigger extension param has been defined
+			if( config.hasParam( TRIGGER_EXTENSION ) ) then {
+				// Specifying the TRIGGER_EXTENSION without a TRIGGER_PARAM is an error
+				if(config.hasParam( TRIGGER_PARAM ) ) then {
+					// Re-start unfinished timer when we receive a new trigger match? 
+					_triggerExtension := config.getOrBoolean( TRIGGER_EXTENSION, false );
+				} else {
+					log "  Param "+ TRIGGER_EXTENSION +" was specified without a corresponding "+TRIGGER_PARAM at ERROR;
+				}
+			}
+			
+			// Action param name: if not given, then set to the trigger param name.
+			_actionParam := config.getOrString( ACTION_PARAM, _triggerParam ).ltrim().rtrim();
+			
+			// Check that a blank param value was not provided, even after trimming the name
+			if( _actionParam.length() = 0 ) then {
+				log "  Param "+ ACTION_PARAM +" cannot be an empty string." at ERROR;
+				result := false;
+			} else if( _actionParam.toLower() = TYPE ) then {
+				// Ensure case is lowered
+				_actionParam := TYPE;
+			}
+			
+			// Is there a particular value we need to look for?
+			// If no value given then use the trigger value.
+			_hasActionParamValue := config.hasParam( ACTION_PARAM_VALUE );
+			if( _actionParam = TYPE 
+			and not _hasActionParamValue
+			and config.hasParam( ACTION_PARAM ) ) then {
+				log "  Param "+ ACTION_PARAM_VALUE +
+					" is mandatory when " + ACTION_PARAM +
+					" is set as '" + TYPE + "'." at ERROR;
+				result := false;
+			} else {
+				if( not _hasActionParamValue ) then {
+					if( not config.hasParam( ACTION_PARAM ) ) then {
+						_hasActionParamValue := _hasTriggerParamValue;
+						_actionParamValue    := _triggerParamValue;
+					} else {
+						_actionParamValue := "";
+					}
+				} else {
+					_actionParamValue := config.getString( ACTION_PARAM_VALUE );
+				}
+				
+				// If action is TYPE, then only one of the allowed values is valid.
+				string lowerTrimmedParamValue := _actionParamValue.toLower().ltrim().rtrim();
+				if( _actionParam = TYPE ) then {
+					if( not lowerTrimmedParamValue = DataConstants.ANOMALY
+					and not lowerTrimmedParamValue = DataConstants.COMPUTED 
+				    and not lowerTrimmedParamValue = DataConstants.RAW ) then {
+						log "  Param "+ ACTION_PARAM_VALUE +
+							" for " + ACTION_PARAM + TYPE +
+							" can only be one of a, c, or r" at ERROR;
+						result := false;
+					} else {
+						// Force the known value type to be lowercase and trimmed
+						_actionParamValue := lowerTrimmedParamValue;
+					}
+				}
+			}
+			
+			if( _actionParam = _triggerParam
+			and _actionParamValue = _triggerParamValue 
+			and _triggerExtension ) then {
+				_triggerExtension := false;
+				log "Disabling triggerExtension as actionParam and triggerParam are the same." at WARN;
+			}
+
+			// Should the suppression be partitioned by the sourceId 
+			_bySourceId := config.getOrBoolean( BY_SOURCEID, true );
+			
+			// Reset param name; empty string -> no reset
+			_resetParam := config.getOrString( RESET_PARAM, "" ).ltrim().rtrim();
+			
+			// Ensure case is lowered
+			if( _resetParam.toLower() = TYPE ) then {
+				_resetParam := TYPE;
+			}
+			// Is there a particular value we need to look for?
+			_hasResetParamValue := config.hasParam( RESET_PARAM_VALUE );
+			if( _resetParam = TYPE and not _hasResetParamValue ) then {
+				log "  Param "+ RESET_PARAM_VALUE +
+					" is mandatory when " + RESET_PARAM +
+					" is set as '" + TYPE + "'." at ERROR;
+				result := false;
+			} else {
+				_resetParamValue := config.getOrString( RESET_PARAM_VALUE, "" );
+				
+				// If reset is TYPE, then only one of the allowed values is valid.
+				string lowerTrimmedParamValue := _resetParamValue.toLower().ltrim().rtrim();
+				if( _resetParam = TYPE ) then {
+					if( not lowerTrimmedParamValue = DataConstants.ANOMALY
+					and not lowerTrimmedParamValue = DataConstants.COMPUTED 
+				    and not lowerTrimmedParamValue = DataConstants.RAW ) then {
+						log "  Param "+ RESET_PARAM_VALUE +
+							" for " + RESET_PARAM + TYPE +
+							" can only be one of a, c, or r" at ERROR;
+						result := false;
+					} else {
+						// Force the known value type to be lowercase and trimmed
+						_resetParamValue := lowerTrimmedParamValue;
+					}
+				}
+			}
+
+			if( (_resetParam = _triggerParam and _resetParamValue = _triggerParamValue )
+			or (_resetParam = _actionParam  and _resetParamValue = _actionParamValue ) ) then {
+				log "  resetParam/resetParamValue pair cannot be the same as the equivalent pair for the trigger param or action param." at ERROR;
+				result := false;
+			}
+			
+			// Time window to carry out suppress action.
+			_timeWindow := config.getOrDecimal( TIMEWINDOW, 60.0d );
+			if( _timeWindow <= 0.0d ) then {
+				log "  Param timeWindow must be positive. Given value: " + _timeWindow.toString() at ERROR;
+				result := false;
+			}
+			
+			_suppressionType := config.getOrString(SUPPRESSION_TYPE, SUPPRESSION_TYPE_START_UNSUPPRESSED);
+			if _suppressionType = SUPPRESSION_TYPE_START_UNSUPPRESSED {
+				_handleActive := noOp;
+				_handleInactive := sendOutput;
+			} else if _suppressionType = SUPPRESSION_TYPE_START_SUPPRESSED {
+				_handleActive := sendOutput;
+				_handleInactive := noOp;
+			} else {
+				sequence<string> suppressionTypes := [SUPPRESSION_TYPE_START_SUPPRESSED, SUPPRESSION_TYPE_START_UNSUPPRESSED];
+				log "  Param " + SUPPRESSION_TYPE + " must be one of " + suppressionTypes.toString() +  ". Given value: " + _suppressionType at ERROR;
+				result := false;
+			}
+		}
+
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		// Remove an expired suppress for the given sourceId.
+		if( _activeSourceIds.hasKey( sourceId ) ) then {
+			if( _activeSourceIds[ sourceId ] <= dataIn.timestamp ) then {
+				_activeSourceIds.remove( sourceId );
+			}
+		}
+		
+		// Reset if reset params are present
+		if( _resetParam = TYPE 
+		or  dataIn.params.hasKey( _resetParam ) ) then {
+			if( not _hasResetParamValue
+			or ( _resetParam = TYPE and dataIn.type = _resetParamValue ) 
+			or ( _hasResetParamValue and not _resetParam = TYPE and dataIn.params[_resetParam] = _resetParamValue ) ) then {
+				if( _bySourceId ) then {
+					if( _activeSourceIds.hasKey( sourceId ) ) then {
+						_activeSourceIds.remove( sourceId );
+					}
+				} else {
+					_activeSourceIds.clear();
+				}
+				sendOutput(dataIn);
+				return;
+			}
+		}
+		
+		// If suppress triggered and action param present then suppress.
+		if( ( _actionParam = TYPE or dataIn.params.hasKey( _actionParam ) )
+		and   _activeSourceIds.hasKey( sourceId ) ) then {
+			if( not _hasActionParamValue 
+			or ( _actionParam = TYPE and dataIn.type = _actionParamValue )
+			or ( _hasActionParamValue and not _actionParam = TYPE and dataIn.params[_actionParam] = _actionParamValue ) ) then {
+				// Send or noOp depending on suppressionType
+				_handleActive(dataIn);
+				return;
+			}
+		}
+		
+		// Put trigger after action to ensure that an initial event is not suppressed when
+		// the triggerParam and actionParam are the same.
+		if( _triggerParam = TYPE 
+		or  dataIn.params.hasKey( _triggerParam ) ) then {
+			if( not _hasTriggerParamValue 
+			or ( _triggerParam = TYPE and dataIn.type = _triggerParamValue ) 
+			or ( _hasTriggerParamValue and not _triggerParam = TYPE and dataIn.params[_triggerParam] = _triggerParamValue ) ) then {
+				if( not _activeSourceIds.hasKey( sourceId )
+				or _triggerExtension ) then {
+					_activeSourceIds[ sourceId ] := dataIn.timestamp + _timeWindow;
+					sendOutput(dataIn);
+					return;
+				}
+			}
+		}
+		
+		// Send or noOp depending on suppressionType
+		_handleInactive(dataIn);
+	}
+	
+	/** @private */
+	action noOp(Data dataIn) {}
+	
+	/** @private */
+	action sendOutput(Data dataIn) {
+		Data dataOut := dataIn.clone();
+		dataOut.streamName := _outputDataName;
+		if( dataOut.type = DataConstants.RAW ) then {
+			dataOut.type := DataConstants.COMPUTED;
+		}
+		_analyticObject.sendData(dataOut);
+	}
+
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset() {
+		_activeSourceIds.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Suppressor Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternSuppressor {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Suppressor.NAME.intern();
+		discard := Suppressor.TRIGGER_PARAM.intern();
+		discard := Suppressor.TRIGGER_PARAM_VALUE.intern();
+		discard := Suppressor.TRIGGER_EXTENSION.intern();
+		discard := Suppressor.ACTION_PARAM.intern();
+		discard := Suppressor.ACTION_PARAM_VALUE.intern();
+		discard := Suppressor.RESET_PARAM.intern();
+		discard := Suppressor.RESET_PARAM_VALUE.intern();
+		discard := Suppressor.BY_SOURCEID.intern();
+		discard := Suppressor.TIMEWINDOW.intern();
+		discard := Suppressor.SUPPRESSION_TYPE.intern();
+		discard := Suppressor.SUPPRESSION_TYPE_START_UNSUPPRESSED.intern();
+		discard := Suppressor.SUPPRESSION_TYPE_START_SUPPRESSED.intern();		
+		discard := Suppressor.CONST_INTERNAL_ALL_SOURCES.intern();
+		
+		on all StayAlive() {}
+	}
+}

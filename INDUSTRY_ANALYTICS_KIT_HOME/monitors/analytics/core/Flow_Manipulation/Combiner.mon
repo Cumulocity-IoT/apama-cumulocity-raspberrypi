@@ -1,0 +1,275 @@
+//*****************************************************************************
+// Title: Combiner Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "Combiner",
+	"description": "Combines multiple data streams into a single stream.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Combiner.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channels to combine",
+			"repeated": true
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Combined",
+			"description": "The combined data channel",
+			"dataProperties": ["+params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "aggregatedSourceId",
+			"description": "Modify all data events to use this sourceId",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.length > 0 | 'Must not be empty' }"
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Combiner Analytic takes one or more input channels, combines
+ *  the unmodified event received onto a single output channel. 
+ *  If the optional parameter <font face="courier" size="-1">aggregatedSourceId</font> 
+ *  is provided, the Combiner aggregates all incoming <font face="courier" size="-1">Data</font>
+ *  events by modifying their <font face="courier" size="-1">sourceId</font> to  
+ *  the one provided. This then allows the data to be treated as a singular aggregated
+ *  source.  For example, if a calculation is required in which the original source of the 
+ *  data values are irrelevant. If the <font face="courier" size="-1">Data</font> events type
+ *  is <font face="courier" size="-1">RAW</font>, the original <font face="courier" size="-1">sourceId</font>
+ *  is added to the generated <font face="courier" size="-1">Data</font> events <font face="courier" size="-1">params</font>.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>One or more input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>aggregatedSourceId</b></td><td>If defined, all Data events that are combined will be modified to use the defined <font face="courier" size="-1">sourceId</font></td>
+ *      <td>Non-Empty String</td><td>String</td><td>False</td><td></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Combiner Analytic which takes Data events from two separate 
+// input channels ("Input1" and "Input2") and publishes the events onto 
+// a single output channel ("Output1")
+send com.industry.analytics.Analytic("Combiner", ["Input1","Input2"], ["Output1"], new dictionary&ltstring,string&gt ) to "";
+
+// Define a Combiner Analytic which takes Data events from two separate 
+// input channels ("Input1" and "Input2") and publishes the events onto 
+// a single output channel ("Output1") and replaces the sourceId parameter
+// of all events with the aggregated SourceId of "myNewId"
+send com.industry.analytics.Analytic("Combiner", ["Input1","Input2"], ["Output1"], {"aggregatedSourceId":"myNewId"} ) to "";
+</code></dd>
+ *</dl>
+ */ 
+event Combiner {	
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Combiner";
+
+	/** This constant defines the configuration parameter name
+	 *  that must be defined when creating an instance of this Analytic. */
+	constant string AGGREGATED_SOURCEID := "aggregatedSourceId";
+	/** This constant defines the configuration parameter name
+	 *  of the originator <font face="courier" size="-1">sourceId</font> that will be cached in the output
+	 *  Data events that are generated by this Analytic. */
+	constant string ORIGINAL_SOURCEID := "originalSourceId";
+	
+	/** Local cached aggregated sourceId configuration parameter name
+	 *  @private */
+	string _aggregatedSourceId;
+	
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                                 to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete) {
+		
+		if( not _validateConfiguration( config ) ) then {
+			initComplete(false, new AnalyticInterface);
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      new action<>,
+		                      initComplete );
+	}
+	
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, -1, 1, 
+		                                         [ AGGREGATED_SOURCEID ], [ Constants.STRING ], [ false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Check that we have at least one input channel
+			if( config.inputDataNames.size() < 1 ) then	{
+				log "inputDataNames sequence should contain at least one entry." at ERROR;
+				log "  inputDataNames: " + config.inputDataNames.toString() at ERROR;
+				result := false;
+			} else {			
+				string currInputName;
+				for currInputName in config.inputDataNames {
+					string trimmedName := currInputName.ltrim().rtrim();
+					if( trimmedName.length() = 0 ) then {
+						log "inputDataNames cannot contain blank strings." at ERROR;
+						result := false;
+					}
+				}
+			}
+
+			_outputDataName := config.outputDataNames[0];
+			
+			// Check if we have defined the optional param to set
+			// the sourceId of the output Data events. If it's not 
+			// provided then we publish with the incoming Data sourceId 
+			if( config.hasParam( AGGREGATED_SOURCEID ) ) then {
+				_aggregatedSourceId := config.getString( AGGREGATED_SOURCEID );
+			}
+
+		} 
+
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dIn ) {
+		log "Processing " + dIn.toString() at DEBUG;
+		
+		// Re-send the Data on the output channel defined.
+		Data dOut := dIn.clone();
+		dOut.streamName := _outputDataName;
+		
+		// If we are using the optional Aggregated SourceId parameter
+		if( _aggregatedSourceId != "" ) then {
+			// If we are changing the sourceId of a Raw event
+			// then we need to change it to a Computed type
+			if( dOut.type = DataConstants.RAW ) then {
+				dOut.type := DataConstants.COMPUTED;
+			}
+			// Modify the sourceId to be the one specified
+			dOut.sourceId := _aggregatedSourceId;
+			
+			// We need to check if the Data event already has the 
+			// Original SourceID in its parameters so that we dont override it
+			if( not dOut.params.hasKey( ORIGINAL_SOURCEID ) ) then {
+				dOut.params[ ORIGINAL_SOURCEID ] := dIn.sourceId;
+			}
+		}
+		
+		// Send the Data to the output channel
+		_analyticObject.sendData( dOut );
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Combiner Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternCombinerChannel {
+	event StayAlive {}
+	
+	action onload() {
+		string discard := Combiner.NAME.intern();
+		on all StayAlive() {}
+	}
+}

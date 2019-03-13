@@ -1,0 +1,507 @@
+//*****************************************************************************
+// Title: Threshold Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.detectors;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+
+/** 
+ *  This event object is a cache of the Threshold 
+ *  data used in the Analytic.  This is only used for 
+ *  internal purposes, and is not exposed to the Users 
+ *  application.
+ *  
+ *  @private
+ */
+event ThresholdData
+{
+	decimal lastValue;
+	decimal lastTimestamp;
+	decimal duration;
+	integer repeats;
+}
+
+/* @AnalyticDefinition
+{
+	"name": "Threshold",
+	"description": "Detect data above or below a threshold.",
+	"group": "Detectors",
+	"documentation": "com/industry/analytics/detectors/Threshold.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to check for threshold breaches",
+			"dataProperties": ["dValue"]
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Breaches",
+			"description": "The channel on which to output threshold breaches",
+			"dataProperties": ["+params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "threshold",
+			"description": "The threshold value that is used to detect breaches",
+			"type": "decimal"
+		},{
+			"name": "direction",
+			"description": "Whether to check for crossing, falling or rising threshold breaches",
+			"type": "string",
+			"optional": true,
+			"defaultValue": "crossing",
+			"validValues": ["crossing", "falling", "rising"]
+		},{
+			"name": "duration",
+			"description": "How long (in seconds) the threshold may be breached before an Anomaly Data is generated. If value=0.0d, then Anomaly Data is generated immediately.",
+			"type": "decimal",
+			"optional": true,
+			"defaultValue": 0,
+			"validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0' }",
+			"postfix": "(Seconds)"
+		},{
+			"name": "repeats",
+			"description": "The maximum number of times an Anomaly Data is generated for the breach before stopping checking. A value of 0 indicates unlimited repeats.",
+			"type": "integer",
+			"optional": true,
+			"defaultValue": 1,
+			"validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0' }"
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Threshold Analytic generates an anomaly Data event if a 
+ *  threshold is breached. The computation can either look for rising 
+ *  breaches, falling breaches or every time a threshold is passed in 
+ *  both directions. These can either be reported immediately or, to 
+ *  ignore spikes, after a set duration based on the Data timestamps.
+ * 
+ *  In addition the computation can output a data event for up to a set 
+ *  maximum number of repeats (multiples of the duration) whilst the 
+ *  breach continues. This latter functionality is not applicable for 
+ *  the bi-directional breach detection as after the duration, the 
+ *  breached side is now considered the valid side and a breach reported 
+ *  for crossing the threshold in the opposite direction.
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only one input Data stream names must be provided.</dd>
+ *  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. Only Data events of Anomaly type are generated.  All the
+ *      <font face="courier" size="-1">params</font> from the breaching input Data are copied to the anomaly Data.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>threshold</b></td><td>Defines the threshold value that is used to detect breaches</td>
+ *      <td>Stringified decimal</td><td>Decimal</td><td>True</td><td></td></tr>
+ *  <tr><td><b>direction</b></td><td>Defines whether to check for crossing, falling or rising threshold breaches</td>
+ *      <td><font face="courier" size="-1">"crossing"</font>, <font face="courier" size="-1">"falling"</font> or <font face="courier" size="-1">"rising"</font>. <b>Note:</b> These values are case-insensitive</td>
+ *      <td>String</td><td>False</td><td><font face="courier" size="-1">'crossing'</font></td></tr>
+ *  <tr><td><b>duration</b></td><td>Defines how long (in seconds) the threshold may be breached before an 
+ *                                  Anomaly Data is generated. If a value of <font face="courier" size="-1"><=0.0d</font> is defined,
+ *                                  the Anomaly Data is generated immediately.</td>
+ *      <td>Stringified Decimal <font face="courier" size="-1">>= 0.0d</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">0.0d</font></td></tr>
+ *  <tr><td><b>repeats</b></td><td>Defines the maximum number of times an Anomaly Data is generated for the breach
+ *                                 before stopping checking. A value of <font face="courier" size="-1">0</font> indicates unlimited repeats. </td>
+ *      <td>Stringified Integer <font face="courier" size="-1">>= 0</font></td><td>Integer</td><td>False</td><td><font face="courier" size="-1">1</font></td>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Threshold Analytic for Data events on the channel "Input1"
+// and generate an anomaly Data event on the channel "Output1" if the value falls
+// below the defined threshold value of 10.0
+send com.industry.analytics.Analytic("Threshold", ["Input1"], ["Output1"], {"threshold":"10.0","direction":"falling"} ) to "";
+
+// Define a Threshold Analytic for Data events on the channel "Input2"
+// and generate an anomaly Data event  on the channel "Output2" if the value goes
+// above the defined threshold value of 60.0 for over 5.0seconds.
+send com.industry.analytics.Analytic("Threshold", ["Input1"], ["Output1"], {"threshold":"60.0","direction":"rising","duration":"5.0"} ) to "";
+</code></dd>
+ *  </dl>
+ */
+event Threshold
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Threshold";
+	
+	/** This constant defines the configuration parameter name that
+	 *  specifies the direction of the threshold check */
+	constant string DIRECTION := "direction";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the duration the threshold can be breached before an
+	 *  Anomaly data event is generated. */
+	constant string DURATION := "duration";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the maximum number of times a threshold can be breached before
+	 *  Anomaly data event will be generated. */
+	constant string REPEATS := "repeats";
+	/** This constant defines the configuration parameter name that
+	 *  specifies the threshold value to check for. */
+	constant string THRESHOLD := "threshold";
+	/** This constant defines the value for setting the 
+	 *  <font face="courier" size="-1">"direction"</font> configuration parameter to 
+	 *  use a crossing threshold breach check. */
+	constant string CROSSING := "crossing";
+	/** This constant defines the value for setting the 
+	 *  <font face="courier" size="-1">"direction"</font> configuration parameter to 
+	 *  use a falling threshold breach check. */
+	constant string FALLING := "falling";
+	/** This constant defines the value for setting the 
+	 *  <font face="courier" size="-1">"direction"</font> configuration parameter to 
+	 *  use a rising threshold breach check. */
+	constant string RISING := "rising";
+	
+	// State
+	/** Local cached dictionary of the threshold breach values, keyed by
+	 *  the sourceId.
+	 *  @private */	
+	dictionary<string /*sourceId*/, ThresholdData> _breaches;
+
+	/** Local cached value for the direction configuration parameter value
+	 *  converted to an integer, for each source. Needed when in crossing mode.
+	 *  @private */
+	dictionary<string /*sourceId*/, string> _directions;
+	
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	
+	/** Local cached value for the direction configuration parameter value
+	 *  @private */
+	string _directionParam;
+	/** Local cached value for the duration configuration parameter value
+	 *  @private */
+	decimal _duration;
+	/** Local cached value for the repeats configuration parameter value
+	 *  @private */
+	integer _repeats;
+	/** Local cached value for the threshold configuration parameter value
+	 *  @private */
+	decimal _threshold;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}	
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ DIRECTION, DURATION, 
+		                                           REPEATS,   THRESHOLD ],
+		      		                           	 [ Constants.STRING,  Constants.DECIMAL,
+		      		                           	   Constants.INTEGER, Constants.DECIMAL ],
+		      		                           	 [ false,  false,
+		      		                           	   false, true ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+
+			// Convert the returned value to lower-case for better matching
+			_directionParam := config.getOrString( DIRECTION,  CROSSING).ltrim().rtrim().toLower();
+
+			if not (_directionParam = CROSSING or _directionParam = FALLING or _directionParam = RISING) then
+			{ 			
+				log "  Param direction must be crossing, falling or rising. Given value: " + _directionParam at ERROR;
+				result := false;
+			}
+			
+			_threshold := config.getDecimal( THRESHOLD );
+			
+			// <= 0 treated as single point breach notified.
+			_duration := config.getOrDecimal( DURATION, 0.0d );
+			
+			_repeats := config.getOrInteger(REPEATS, 1);
+			if( _repeats = 0 ) then	{
+				_repeats := integer.MAX;
+			} else if( _repeats < 0 ) then {
+				log "  Param repeats must be zero or positive." at ERROR;
+				result := false;
+			} else if( ( _repeats > 1 ) and ( _directionParam = CROSSING ) )then	{
+				_repeats := 1;
+				log "  Param repeats ignored for crossing threshold breach as a single duration period determines when the breach direction reverses." at WARN;
+			}
+		}
+		
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData(Data dataIn)
+	{
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		_processValue(dataIn);
+		
+	}
+
+	/**@private
+	*/
+	action _processValue(Data dataIn)
+	{
+		
+		// Check whether an existing breach exists.
+		// If _breaches has an sourceId, _direction should too.
+		if _breaches.hasKey(dataIn.sourceId) then
+		{
+			// Reset
+			if (_directions[dataIn.sourceId] = RISING and dataIn.dValue <= _threshold) or
+			   (_directions[dataIn.sourceId] = FALLING and dataIn.dValue >= _threshold) then
+			{
+				_breaches.remove(dataIn.sourceId);
+			}
+			else // update breach details
+			{
+				ThresholdData breach := _breaches[dataIn.sourceId];
+				breach.lastValue := dataIn.dValue;
+				breach.duration := breach.duration + (dataIn.timestamp - breach.lastTimestamp);
+				breach.lastTimestamp := dataIn.timestamp;
+				if breach.repeats < _repeats and
+				   breach.duration >= _duration * (breach.repeats + 1).toDecimal() then
+				{
+					_sendBreach(dataIn);
+					// Once the CROSSING breach has lasted for _duration, then it becomes the new normal.
+					if _directionParam = CROSSING then
+					{
+						_breaches.remove(dataIn.sourceId);
+						if _directions[dataIn.sourceId] = RISING then
+						{
+							_directions[dataIn.sourceId] := FALLING;
+						}
+						else /* FALLING */
+						{
+							_directions[dataIn.sourceId] := RISING;
+						}
+					}
+					else
+					{
+						breach.repeats := breach.repeats + 1;
+					}
+				}
+			}
+			return;
+		}
+		
+		// No pre-existing breach
+		if (_directionParam = RISING and dataIn.dValue > _threshold) or
+		   (_directionParam = FALLING and dataIn.dValue < _threshold) then
+		{
+			_directions[dataIn.sourceId] := _directionParam;
+			ThresholdData breach := new ThresholdData;
+			breach.lastValue := dataIn.dValue;
+			breach.lastTimestamp := dataIn.timestamp;
+			breach.duration := 0.0d;
+			breach.repeats := 0;
+			_breaches[dataIn.sourceId] := breach;
+			if _duration <= 0.0d then
+			{
+				// Send an immediate notification
+				_sendBreach(dataIn);
+				breach.repeats := 1;
+			}
+		}
+		else if _directionParam = CROSSING then
+		{
+			if not _directions.hasKey(dataIn.sourceId) then
+			{
+				// Establish which side of the threshold we'll take
+				// as the first normal.
+				if dataIn.dValue < _threshold then
+				{
+					_directions[dataIn.sourceId] := RISING;
+				}
+				else if dataIn.dValue > _threshold then
+				{
+					_directions[dataIn.sourceId] := FALLING;
+				}
+				// If we happen to be bang on the threshold then wait for the next Data for the source.
+			}
+			else
+			{
+				if (_directions[dataIn.sourceId] = RISING and dataIn.dValue > _threshold) or
+				   (_directions[dataIn.sourceId] = FALLING and dataIn.dValue < _threshold) then
+				{
+					ThresholdData breach := new ThresholdData;
+					breach.lastValue := dataIn.dValue;
+					breach.lastTimestamp := dataIn.timestamp;
+					breach.duration := 0.0d;
+					breach.repeats := 0;
+					_breaches[dataIn.sourceId] := breach;
+					if _duration <= 0.0d then
+					{
+						// Send an immediate notification
+						_sendBreach(dataIn);
+						breach.repeats := 1;
+						if _repeats = 1 then
+						{
+							_breaches.remove(dataIn.sourceId);
+							if _directions[dataIn.sourceId] = RISING then
+							{
+								_directions[dataIn.sourceId] := FALLING;
+							}
+							else /* FALLING */
+							{
+								_directions[dataIn.sourceId] := RISING;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	/**
+  	 *  This action is called internally and should not be called
+  	 *  directly by the Users application.
+ 	 *
+ 	 *  @private
+ 	 */	
+	action _sendBreach(Data dataIn)
+	{
+		Data dataOut := dataIn.clone();
+		dataOut.streamName := _outputDataName;
+		dataOut.type       := DataConstants.ANOMALY;
+		dataOut.params[Constants.ANOMALY_SOURCE] := NAME;
+		dataOut.params[DURATION] := _breaches[dataIn.sourceId].duration.toString();
+		dataOut.params[DIRECTION] := _directions[dataIn.sourceId];
+		_analyticObject.sendData(dataOut);
+	}
+
+
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset() {
+		_breaches.clear();
+		_directions.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Threshold Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternThreshold {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Threshold.NAME.intern();
+		discard := Threshold.DIRECTION.intern();
+		discard := Threshold.DURATION.intern();
+		discard := Threshold.REPEATS.intern();
+		discard := Threshold.THRESHOLD.intern();
+		discard := Threshold.CROSSING.intern();
+		discard := Threshold.FALLING.intern();
+		discard := Threshold.RISING.intern();
+		on all StayAlive() {}
+	}
+}

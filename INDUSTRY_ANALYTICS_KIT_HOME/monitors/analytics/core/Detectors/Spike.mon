@@ -1,0 +1,631 @@
+//*****************************************************************************
+// Title: Spike Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.detectors;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+using com.industry.analytics.TimeWeightedBollinger;
+
+/* @AnalyticDefinition
+{
+	"name": "Spike",
+	"description": "Automatically detect unusual spikes in a data stream.",
+	"group": "Detectors",
+	"documentation": "com/industry/analytics/detectors/Spike.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to check for spikes",
+			"dataProperties": ["dValue"]
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Spikes",
+			"description": "The channel on which to output spike anomalies",
+			"dataProperties": ["+dValue"]
+		},{
+			"name": "Moving Average",
+			"prefix": "avg:",
+			"description": "The channel on which to output the moving average",
+			"type": "string",
+			"optional": true,
+			"dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"]
+		},{
+			"name": "Variance",
+			"prefix": "variance:",
+			"description": "The channel on which to output the moving average",
+			"type": "string",
+			"optional": true,
+			"dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"]
+		},{
+			"name": "Standard Deviation",
+			"prefix": "stddev:",
+			"description": "The channel on which to output the Standard deviation",
+			"type": "string",
+			"optional": true,
+			"dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"]
+		},{
+			"name": "Upper",
+			"prefix": "upper:",
+			"description": "The channel on which to output the upper boundary",
+			"type": "string",
+			"optional": true,
+			"dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"]
+		},{
+			"name": "Lower",
+			"prefix": "lower:",
+			"description": "The channel on which to output the lower boundary",
+			"type": "string",
+			"optional": true,
+			"dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "timeWindow",
+			"description": "The time window (in seconds) that moving average is calculated on",
+			"type": "decimal",
+			"defaultValue": "60.0d",
+            "optional": true,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"postfix": "(Seconds)"
+		},{
+			"name": "standardDeviationMultiple",
+			"description": "Sets the width of the Nominal Range in STDDEV",
+			"type": "decimal",
+			"defaultValue": "2.0d",
+			"advanced":true,
+            "optional": true,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }"
+		},{
+			"name": "warmUp",
+			"description": "The number of events to use to calculate the inital bounds.",
+			"type": "integer",
+			"advanced":true,
+			"optional": true,
+			"defaultValue":5,
+			"validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0' }",
+			"postfix": "(Event Count)"
+		},{
+			"name": "verbose",
+			"description": "Enables/Disables the verbose mode so that computed values are generated as well as anomaly values.",
+			"type": "boolean",
+			"advanced":true,
+            "optional": true,
+			"defaultValue":false,
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Spike Analytic takes a set of input Data events and, 
+ *  using the same time weighted calculations as used in the Average 
+ *  and Volatility Analytics, calculates the Nominal Range as a Bollinger Band 
+ *  centred on the moving average and bounded by a configured multiple 
+ *  of the standard deviation away from the moving average. 
+ * 
+ *  The analytic will also optionally output to configured channels 
+ *  the output from various stages of the Bollinger calculation to 
+ *  save duplicate calculations within a separate analytic.
+ * 
+ *  If the input Data breaks the Nominal Range then an Anomaly Data
+ *  is always output. By default, no output is generated when the bounds 
+ *  have not been breached, but this can optionally be enabled by setting the
+ *  <font face="courier" size="-1">"verbose"</font> parameter to 
+ *  <font face="courier" size="-1">true</font>.
+ *  These Data events will be output as Computed Data events. 
+ *
+ *  In both cases, the <font face="courier" size="-1">dValue</font> set on the Data event is 
+ *  the number of standard deviations that the input Data <font face="courier" size="-1">dValue</font>
+ *  is away from the moving average.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single Data stream name must be provided.<br>The resulting 
+ *      generated Data events on that stream name will either be:</ul>
+ *      <li>Anomaly Data events if the Nominal Range has been breached.</li>
+ *      <li>(Optionally enabled) Computed Data events if the Nominal Range has not been breached</li>
+ *      </ul>
+ *      In both cases, the Data events <font face="courier" size="-1">dValue</font> is set to the number of standard 
+ *      deviations that the input Data <font face="courier" size="-1">dValue</font> is away from the moving average.
+ *      All the parameters from the input Data are copied to the output Data events.
+ *  
+ *      A set of Computed Data streams can also be optionally enabled in the Analytics
+ *      outputDataName parameter by providing the channel name with the corresponding prefix.
+ *      For example, specifying the outputChannelName with "stddev:MyStandardDeviationChannel", 
+ *      will send Data events containing the calculated standard deviation on the channel "MyStandardDeviationChannel".
+ *
+ *      The table below defines the computed data stream type and the prefix required:<ul>
+ *      <dd>
+ *      <table border="1" style="border-collapse: collapse;width:100%">
+ *      <tr><th>Calculation Type</th><th>Description</th><th>Output Channel Name Prefix</th></tr>
+ *      <tr><td><b>Upper boundary</b></td><td>If this parameter is provided, Data events containing the calculated upper 
+ *          Nominal Range will be sent on the stream name provided by this parameters value</td><td><font face="courier" size="-1">upper:</font></td></tr>
+ *      <tr><td><b>Lower boundary</b></td><td>If this parameter is provided, Data events containing the calculated lower 
+ *          Nominal Range will be sent on the stream name provided by this parameters value</td><td><font face="courier" size="-1">lower:</font></td></tr>
+ *      <tr><td><b>Moving average</b></td><td>If this parameter is provided, Data events containing the calculated moving 
+ *          average data will be sent on the stream name provided by this parameters value</td><td><font face="courier" size="-1">avg:</font></td></tr>
+ *      <tr><td><b>Standard deviation</b></td><td>If this parameter is provided, Data events containing the calculated standard 
+ *          deviation data will be sent on the stream name provided by this parameters value</td><td><font face="courier" size="-1">stddev:</font></td></tr>
+ *      <tr><td><b>Variance</b></td><td>If this parameter is provided, Data events containing the calculated variance data
+ *          will be sent on the stream name provided by this parameters value</td><td><font face="courier" size="-1">variance:</font></td></tr>
+ *      </table></dd>
+ * </dd>
+ *  </dl><dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>The time window (in seconds) that moving average is calculated on</td>
+ *      <td>Value must be > 0</td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">60.0d</font></td></tr>
+ *  <tr><td><b>standardDeviationMultiple</b></td><td>Sets the width of the Nominal Range in STDDEV</td>
+ *      <td>Value must be > 0</td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">2</font></td></tr>
+ *  <tr><td><b>warmUp</b></td><td>The number of events to use to calculate the inital bounds. No anomalies will be generated during calculation.</td>
+ *      <td>Value must be >= 0</td><td>Integer</td><td>False</td><td><font face="courier" size="-1">5</font></td></tr>
+ *  <tr><td><b>verbose</b></td><td>Enables/Disables the verbose mode so that computed values are generated as well as anomaly values.</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">false</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Spike Analytic for Data events on the channel "Input1"
+// and generate an anomaly Data event on the channel "Output1" if the value goes outside
+// 2.0 standard deviations away from the moving average which was calculated over 10.0 seconds 
+send com.industry.analytics.Analytic("Spike", ["Input1"], ["Output1"], {"timeWindow":"10.0","standardDeviationMultiple":"2.0"} ) to "";
+
+// Define a Spike Analytic for Data events on the channel "Input1"
+// and generate an anomaly Data event on the channel "Output2" if the value goes outside   
+// 2.0 standard deviations away from the moving average which was calculated over 10.0 seconds. 
+// Also send the raw Data events on the "Output2" channel, the values calculated
+// for the upper and lower boundaries on "UpperChannel" and "LowerChannel", and 
+// the moving Average calculation on the "AverageChannel"
+send com.industry.analytics.Analytic("Spike", ["Input2"], ["Output2", "upper:UpperChannel","lower:LowerChannel","avg:AverageChannel","verbose:true"], 
+						{"timeWindow":"10.0","standardDeviationMultiple":"2.0"} ) to "";
+</code></dd>
+ *  </dl>
+ */
+event Spike
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Spike";
+	
+	/** This constant defines the configuration parameter name
+	 *  for the time window (in seconds as a decimal) that moving average is calculated on */
+	constant string TIMEWINDOW := "timeWindow";
+	/** This constant defines the configuration parameter name
+	 *  for the width of the Nominal Range in STDDEVs (as a decimal value) */
+	constant string STANDARD_DEVIATION_MULTIPLE := "standardDeviationMultiple";
+	/** This constant defines the configuration parameter name
+	 *  for enabling Verbose mode on/off.  */
+	constant string VERBOSE := "verbose";
+	constant string WARMUP := "warmUp";
+	
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	/** Local cached output Data name for the optionally enabled 
+	 *  moving Average calculations Data stream.
+	 *  @private */
+	string _movingAverageChannel;
+	/** Local cached output Data name for the optionally enabled 
+	 *  Standard Deviation calculations Data stream.
+	 *  @private */
+	string _standardDeviationChannel;
+	/** Local cached output Data name for the optionally enabled 
+	 *  Lower Boundary calculations Data stream.
+	 *  @private */
+	string _lowerBoundaryChannel;
+	/** Local cached output Data name for the optionally enabled 
+	 *  Upper Boundary band calculations Data stream.
+	 *  @private */
+	string _upperBoundaryChannel;
+	/** Local cached output Data name for the optionally enabled 
+	 *  Variance calculations Data stream.
+	 *  @private */
+	string _varianceChannel;
+	
+	// State
+	/** Local cached previous Bollinger band data for each incoming sourceId
+	 *  @private */
+	dictionary<string /*sourceId*/, TimeWeightedBollinger> _bollingers;
+	
+	/** Local cached boolean parameter that indicates raw data should  
+	 *  be sent on the output Data stream as well as anomalies.
+	 *  @private */
+	boolean _verbose;
+	/** Local cached value for the defined timewindow
+	 *  @private */
+	decimal _timeWindow;
+	/** Local cached value for the defined Nominal Range width
+	 *  @private */
+	decimal _standardDeviationMultiple;
+	/** Local cached boolean value that indicates whether or not to generate 
+	 *  a Data with the standard deviation data
+	 *  @private */
+	boolean _sendStandardDeviation;
+	/** Local cached boolean value that indicates whether or not to generate 
+	 *  a Data with the moving average data
+	 *  @private */
+	boolean _sendMovingAverage;
+	/** Local cached boolean value that indicates whether or not to generate 
+	 *  a Data with the Lower Boundary data
+	 *  @private */
+	boolean _sendLowerBoundary;
+	/** Local cached boolean value that indicates whether or not to generate 
+	 *  a Data with the Upper Boundary data
+	 *  @private */
+	boolean _sendUpperBoundary;
+	/** Local cached boolean value that indicates whether or not to generate 
+	 *  a Data with the Variance data
+	 *  @private */
+	boolean _sendVariance;
+	/** Local cached param value determining the warmup period
+	 * @private */
+	integer _warmUpCount;
+
+	/** Used for the warmUp period calculation for each of sourceId
+	 * @private */
+	dictionary<string /*sourceId*/, integer/*eventCount*/> _eventCounts;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if not _validateConfiguration( config ) {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, -1, 
+		                                         [ STANDARD_DEVIATION_MULTIPLE, TIMEWINDOW, VERBOSE ],
+		                                         [ Constants.DECIMAL, Constants.DECIMAL, Constants.BOOLEAN ],
+		      		                           	 [ false, false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if result {
+
+			if config.outputDataNames.size() < 1 or config.outputDataNames.size() > 7 {
+				log "outputDataNames sequence should have at least one required entry, and upto 6 optional channels" at ERROR;
+				log "  outputDataNames: " + config.outputDataNames.toString() at ERROR;
+				result := false;
+			} else {	
+				_outputDataName := config.outputDataNames[0];
+	
+				// Check that no blank strings were provided either
+				// Also check for trimming the name
+				if _outputDataName.ltrim().length() = 0 {
+					log "outputDataNames cannot contain blank strings." at ERROR;
+					result := false;
+				}
+				
+				string currOutputChannel;
+				for currOutputChannel in config.outputDataNames {
+					// Remove any whitespace
+					currOutputChannel := currOutputChannel.ltrim().rtrim();
+					
+					// Convert the output channel to lower case to do a case insensitive check on the prefix 
+					string lowerCurrOutputChannel := currOutputChannel.toLower(); 
+					
+					if lowerCurrOutputChannel.findFrom( "upper:", 0 ) != -1 {
+						if	_sendUpperBoundary {
+							log "  Cannot specify more than one Upper Boundary output channel." at ERROR;
+							result := false;
+						} else {
+							_sendUpperBoundary    := true;
+							_upperBoundaryChannel := currOutputChannel.substring(6, currOutputChannel.length() );
+							// Check that a blank channel name was not provided, even after trimming the name
+							if _upperBoundaryChannel.ltrim().length() = 0 {
+								log "  Upper Boundary output channel cannot be an empty string." at ERROR;
+								result := false;
+							}
+						}
+					} else if lowerCurrOutputChannel.findFrom( "lower:", 0 ) != -1 {
+						if	_sendLowerBoundary {
+							log "  Cannot specify more than one Lower Boundary output channel." at ERROR;
+							result := false;
+						} else {
+							_sendLowerBoundary    := true;
+							_lowerBoundaryChannel := currOutputChannel.substring(6, currOutputChannel.length() );
+							// Check that a blank channel name was not provided, even after trimming the name
+							if _lowerBoundaryChannel.ltrim().length() = 0 {
+								log "  Lower Boundary output channel cannot be an empty string." at ERROR;
+								result := false;
+							}
+						}
+					} else if lowerCurrOutputChannel.findFrom( "variance:", 0 ) != -1 {
+						if	_sendVariance {
+							log "  Cannot specify more than one Variance output channel." at ERROR;
+							result := false;
+						} else {
+							_sendVariance    := true;
+							_varianceChannel := currOutputChannel.substring(9, currOutputChannel.length() );
+							// Check that a blank channel name was not provided, even after trimming the name
+							if _varianceChannel.ltrim().length() = 0 {
+								log "  Variance output channel cannot be an empty string." at ERROR;
+								result := false;
+							}
+						}
+					} else if lowerCurrOutputChannel.findFrom( "avg:", 0 ) != -1 {
+						if _sendMovingAverage {
+							log "  Cannot specify more than one Moving Average output channel." at ERROR;
+							result := false;
+						} else {
+							_sendMovingAverage    := true;
+							_movingAverageChannel := currOutputChannel.substring(4, currOutputChannel.length() );
+							// Check that a blank channel name was not provided, even after trimming the name
+							if _movingAverageChannel.ltrim().length() = 0 {
+								log "  Moving Average output channel cannot be an empty string." at ERROR;
+								result := false;
+							}
+						}
+					} else if lowerCurrOutputChannel.findFrom( "stddev:", 0 ) != -1 {
+						if	_sendStandardDeviation {
+							log "  Cannot specify more than one Standard Deviation output channel." at ERROR;
+							result := false;
+						} else {
+							_sendStandardDeviation    := true;
+							_standardDeviationChannel := currOutputChannel.substring(7, currOutputChannel.length() );
+							// Check that a blank channel name was not provided, even after trimming the name
+							if _standardDeviationChannel.ltrim().length() = 0 {
+								log "  Standard Deviation output channel cannot be an empty string." at ERROR;
+								result := false;
+							}
+						}
+					} else if currOutputChannel != _outputDataName {
+						// If this was not one of the "special" channels, and was not
+						// the standard output channel, then log an error
+						log "  Cannot specify more than one standard output channel." at ERROR;
+						result := false;
+					}
+				}
+			}
+		}
+
+		// Only check the params if the input/output channel checks were valid
+		if result {
+			_verbose := config.getOrBoolean( VERBOSE, false );
+			
+			_timeWindow := config.getOrDecimal(TIMEWINDOW, 60.0d);
+			if _timeWindow <= 0.0d {
+				log "  Param " + TIMEWINDOW +
+					" must be positive. Given value: " + _timeWindow.toString() at ERROR;
+				result := false;
+			}
+			
+			_standardDeviationMultiple := config.getOrDecimal(STANDARD_DEVIATION_MULTIPLE, 2.0d);
+			if _standardDeviationMultiple <= 0.0d {
+				log "  Param " + STANDARD_DEVIATION_MULTIPLE +
+					" must be positive. Given value: " + _standardDeviationMultiple.toString() at ERROR;
+				result := false;
+			}
+
+			_warmUpCount := config.getOrInteger(WARMUP, 5);
+			if _warmUpCount < 0 {
+				log "  Param " + WARMUP + " cannot be negative. Given value: " + _warmUpCount.toString() at ERROR;
+				result := false;
+			}
+		}
+		
+		return result;
+	}
+	
+		
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 * 
+	 *  The following formulaes are implemented: 
+	 * 
+	 *  Moving average:
+	 *  Standard formulation:
+	 *  ma_n = a * x_n + (1 - a) * ma_n-1
+	 *       = ma_n-1 + a * (x_n - ma_n-1)
+	 *  a = (1 - e^-u)
+	 *  u = (t_n - t_n-1) / T
+	 *
+	 *  Re-arrange for efficiency:
+	 *  ma_n = (1 - a) * x_n + a * ma_n-1
+	 *       = x_n + a * (ma_n-1 - x_n)
+	 *  a = e^-u
+	 *  u = (t_n - t_n-1) / T
+	 *
+	 *  Variance:
+	 *  S_n  = a * S_n-1 + (1 - a)(x_n - ma_n)(x_n - ma_n-1)
+	 *       = a * (S_n-1 + (1 - a)(x_n - ma_n-1)^2)
+	 *
+	 *  Standard deviation:
+	 *  StDev = S_n^0.5
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		integer currCount := _eventCounts.getOrAddDefault( dataIn.sourceId ) + 1;
+		_eventCounts[ dataIn.sourceId ] := currCount;
+		
+		TimeWeightedBollinger twb;
+		if( _bollingers.hasKey( dataIn.sourceId ) ) then {
+			twb := _bollingers[ dataIn.sourceId ];
+			twb.update( dataIn.dValue, dataIn.timestamp );
+		} else {
+			twb := new TimeWeightedBollinger;
+			twb.init( dataIn.dValue, dataIn.timestamp, _timeWindow, _standardDeviationMultiple );
+			_bollingers[ dataIn.sourceId ] := twb;
+		}
+
+		Data dataOut;
+		// Do not send anomalies during warm up period
+		if( currCount > _warmUpCount )
+		and ( dataIn.dValue < twb.eLowerBollinger() or dataIn.dValue > twb.eUpperBollinger() ) then {
+			dataOut := dataIn.clone();
+			dataOut.streamName := _outputDataName;
+			dataOut.type       := DataConstants.ANOMALY;
+			dataOut.dValue     := (dataIn.dValue - twb.eMa()) / twb.eStDev();
+			dataOut.params[ Constants.ANOMALY_SOURCE ] := NAME;
+			_analyticObject.sendData(dataOut);
+		} else if( _verbose ) then {
+			dataOut := dataIn.clone();
+			dataOut.streamName := _outputDataName;
+			dataOut.type       := DataConstants.RAW;
+			_analyticObject.sendData(dataOut);
+		}
+
+		if( _sendMovingAverage 
+  		or  _sendStandardDeviation
+		or _sendLowerBoundary
+		or _sendUpperBoundary
+		or _sendVariance ) then {
+			dataOut := dataIn.clone();
+		} else {
+			return;
+		}
+		dataOut.type := DataConstants.COMPUTED;
+		
+		if( _sendMovingAverage ) then {
+			dataOut.streamName := _movingAverageChannel;
+			dataOut.dValue     := twb.eMa();
+			_analyticObject.sendData(dataOut);
+		}
+		if( _sendVariance ) then {
+			dataOut.streamName := _varianceChannel;
+			dataOut.dValue     := twb.eVar();
+			_analyticObject.sendData(dataOut);
+		}
+		if( _sendStandardDeviation ) then {
+			dataOut.streamName := _standardDeviationChannel;
+			dataOut.dValue     := twb.eStDev();
+			_analyticObject.sendData(dataOut);
+		}
+		if( _sendLowerBoundary ) then {
+			dataOut.streamName := _lowerBoundaryChannel;
+			dataOut.dValue     := twb.eLowerBollinger();
+			_analyticObject.sendData(dataOut);
+		}
+		if( _sendUpperBoundary ) then {
+			dataOut.streamName := _upperBoundaryChannel;
+			dataOut.dValue     := twb.eUpperBollinger();
+			_analyticObject.sendData(dataOut);
+		}
+	}
+
+
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset() {
+		_bollingers.clear();
+		_eventCounts.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Spike Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternSpike {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Spike.NAME.intern();
+		discard := Spike.TIMEWINDOW.intern();
+		discard := Spike.STANDARD_DEVIATION_MULTIPLE.intern();
+		on all StayAlive() {} 
+	}
+}

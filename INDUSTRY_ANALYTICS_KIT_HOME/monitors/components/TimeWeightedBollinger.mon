@@ -1,0 +1,151 @@
+//*****************************************************************************
+// Title: TimeWeightedBollinger
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+
+/**
+ *  This event handles the storage and calculations
+ *  for time weighted bollinger bands. Internally
+ *  the TimeWeightedVariance event is used.
+ *  
+ *  The following formulas are implemented: 
+ * 
+ *  Moving average:
+ *  Standard formulation:
+ *  ma_n = a * x_n + (1 - a) * ma_n-1
+ *       = ma_n-1 + a * (x_n - ma_n-1)
+ *  a = (1 - e^-u)
+ *  u = (t_n - t_n-1) / T
+ *
+ *  Re-arrange for efficiency:
+ *  ma_n = (1 - a) * x_n + a * ma_n-1
+ *       = x_n + a * (ma_n-1 - x_n)
+ *  a = e^-u
+ *  u = (t_n - t_n-1) / T
+ *
+ *  Variance:
+ *  S_n  = a * S_n-1 + (1 - a)(x_n - ma_n)(x_n - ma_n-1)
+ *       = a * (S_n-1 + (1 - a)(x_n - ma_n-1)^2)
+ *
+ *  Standard deviation:
+ *  StDev = S_n^0.5
+ */
+event TimeWeightedBollinger
+{
+	/** TimeWeightedVariance event.
+	 *  @private */
+	TimeWeightedVariance _twv;
+	/** Multiple of standard deviation to add and subtract
+	 *  from the moving average to create the Bollinger bands.
+	 *  @private */
+	decimal _standardDeviationMultiple;
+	/** Lower Bollinger band value.
+	 *  @private */
+	decimal _eLowerBollinger;
+	/** Upper Bollinger band value.
+	 *  @private */
+	decimal _eUpperBollinger;
+
+
+	/** 
+	 *  Call this action immediately after creating a new instance of this event.
+	 *  Initialises the time weighted variance.
+	 *  
+	 *  @param	value	The first decimal value in the set of data to be analysed.
+	 *  @param	timestamp	The decimal timestamp when the first value was generated.
+	 *	@param	timeWindow	The time window for the weight: T in the above formulas.
+	 *  @param	standardDeviationMultiple	The multiple to be used on the standard deviation for deriving the upper and lower Bollinger bands.
+	 */
+	action init(decimal value, decimal timestamp, decimal timeWindow, decimal standardDeviationMultiple)
+	{
+		_twv.init(value, timestamp, timeWindow);
+		_standardDeviationMultiple := standardDeviationMultiple;
+		_eLowerBollinger := value;
+		_eUpperBollinger := value;
+	}
+
+
+	/** 
+	 *  Returns the current moving average.
+	 *  
+	 *  @returns Moving average as a decimal value.
+	 */
+	action eMa() returns decimal
+	{
+		return _twv.eMa();
+	}
+
+
+	/** 
+	 *  Returns the current variance.
+	 *  
+	 *  @returns Variance as a decimal value.
+	 */
+	action eVar() returns decimal
+	{
+		return _twv.eVar();
+	}
+
+
+	/** 
+	 *  Returns the current standard deviation.
+	 *  
+	 *  @returns Standard deviation as a decimal value.
+	 */
+	action eStDev() returns decimal
+	{
+		return _twv.eStDev();
+	}
+
+
+	/** 
+	 *  Returns the current lower Bollinger value.
+	 *  
+	 *  @returns Lower Bollinger value as a decimal value.
+	 */
+	action eLowerBollinger() returns decimal
+	{
+		return _eLowerBollinger;
+	}
+
+
+	/** 
+	 *  Returns the current upper Bollinger value.
+	 *  
+	 *  @returns Upper Bollinger value as a decimal value.
+	 */
+	action eUpperBollinger() returns decimal
+	{
+		return _eUpperBollinger;
+	}
+
+
+	/** 
+	 *  Updates the bollinger bands with a new data point.
+	 *  
+	 *  @param	value	The decimal value to be added to the analysis.
+	 *  @param	timestamp	The decimal timestamp when the value was generated.
+	 */
+	action update(decimal value, decimal timestamp)
+	{
+		_twv.update(value, timestamp);
+		_eLowerBollinger := _twv.eMa() - (_twv.eStDev() * _standardDeviationMultiple);
+		_eUpperBollinger := _twv.eMa() + (_twv.eStDev() * _standardDeviationMultiple);
+	}
+}

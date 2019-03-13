@@ -1,0 +1,490 @@
+//*****************************************************************************
+// Title: Merger Analytic Implementation
+//
+// Copyright (c) 2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Constants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+
+using com.apama.exceptions.Exception;
+
+/* @AnalyticDefinition
+{
+	"name": "Merger",
+	"description": "Either adds static data or merges data from another channel onto a single data event on the output channel.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Merger.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to merge into"
+		},{
+			"name": "Merging",
+			"description": "The channel to merge from",
+			"optional": true
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Merged",
+			"description": "Merged data channel"
+		}
+	],
+	"properties": [
+		{
+			"name": "mapping",
+			"description": "A dictionary of output field names (eg. \"dValue\") and the value that they should be set to (eg. \"${dValue}\" or \"helloWorld\")",
+			"type": "string"
+		},{
+			"name": "overwriteExistingParams",
+			"description": "Should the merge channel overwrite the existing params on the data channel.",
+			"type": "boolean",
+			"optional": true,
+			"defaultValue": "true"
+		},{
+			"name": "bySourceId",
+			"description": "Whether the merging should be done by sourceId.",
+			"type": "boolean",
+			"optional": true,
+			"advanced": true
+		},{
+			"name": "managementId",
+			"description": "Defines the id used for management of the analytic",
+			"type": "string",
+			"optional": true,
+			"advanced": true
+		}
+	]
+}
+*/
+/**
+ *  The Merger Analytic either adds static data or merges data from another channel onto a single data event on the output channel. 
+ *  
+ *  The "mapping" dictionary contains instuctions on what to set the output fields to. The format is {"outputFieldName":"outputFieldValue"} eg. {"dValue":"${xValue}","sValue":"helloWorld","xValue":"${param.number}"}
+ *
+ *  If a merging stream is provided then the analytic will not output until it has received a data event on both channels and will output every event thereafter.
+ *
+ *  To avoid having to escape double quotes with backslashes in the "mapping" param, use a dictionary literal and call ".toString()" (see the Example Usage)
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>A stream of data events to modify and optionally a stream of data events to merge.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided.  All the non-overwritten
+ *      <font face="courier" size="-1">params</font> from the input Data are copied to the output Data events.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>mapping</b></td><td>The field to set (as the dictionary's key) and the value (as the dictionary's value). The value uses substitution to get the values from the merging stream eg. "${sValue}__HelloWorld"</td>
+ *      <td>The key must contain one of "sourceId","timestamp","dValue","sValue","xValue","yValue","zValue","param.myParamName","params". All params can be merged using "params":"*"</td><td>Stringified dictionary&ltstring,string&gt</td><td>true</td><td></td></tr>
+ *  <tr><td><b>overwriteExistingParams</b></td><td>Should the analytic overwrite params if they already exist on the data stream.</td>
+ *      <td></td><td>boolean</td><td>false</td><td>true</td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>Causes the analytic to merge only where the input data's sourceId matches the merge data's sourceId.</td>
+ *      <td></td><td>boolean</td><td>false</td><td>true</td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Static enrichment, setting the sValue to "helloWorld"
+send com.industry.analytics.Analytic("Merger", ["Input1"], ["Output1"], {mapping: {"sValue":"helloWorld"}.toString()})
+
+// Merge another channel. Setting the sValue to be the sValue from the merged channel and adding a param
+send com.industry.analytics.Analytic("Merger", ["Input1"], ["Output1"], {{mapping: {"sValue":"${sValue}","param.abc":"helloWorld"}.toString()} ) to "";
+</code></dd>
+ *</dl>
+ */
+event Merger {
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Merger";
+
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the data will be
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCE_ID := "bySourceId";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	constant string MAPPING := "mapping";
+	
+	constant string OVERWRITE_EXISTING_PARAMS := "overwriteExistingParams";
+	
+	boolean _overwriteExisting;
+	
+	/** Local cached bySourceId value
+	 *  @private */
+	boolean _bySourceId;
+	
+	/** Local cached sourceChannel value
+	 *  @private */
+	string _sourceChannel;
+	
+	/** Local cached mergeChannel value
+	 *  @private */
+	optional<string> _mergeChannel;
+	
+	/** Local cached param mapping
+	 *  @private */
+	dictionary<string, string> _mapping;
+	
+	/** Local cached data received
+	 *  @private */
+	dictionary<string, dictionary<string , Data> > _dataBySourceIdAndChannel;
+
+	dictionary<string, action<Data, string> > _outputHandlers;
+	dictionary<string, action<Data> returns string> _valueGetters;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+	/** Local cached output Data name. Used when sending Data events
+	 *  @private */
+	string _outputDataName;
+	
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                                 to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+		_outputHandlers := {
+			Constants.DVALUE: dValueOut,
+			Constants.SVALUE: sValueOut,
+			Constants.XVALUE: xValueOut,
+			Constants.YVALUE: yValueOut,
+			Constants.ZVALUE: zValueOut,
+			"timestamp": timestampOut,
+			Constants.TYPE: typeOut,
+			"sourceid": sourceIdOut,
+			"params": new action<Data, string> // This is the case where all params are copied and is implemented separately
+			// Individual params are handled separately
+		};
+		
+		_valueGetters := {
+			Constants.DVALUE: dValueGetter,
+			Constants.SVALUE: sValueGetter,
+			Constants.XVALUE: xValueGetter,
+			Constants.YVALUE: yValueGetter,
+			Constants.ZVALUE: zValueGetter,
+			"timestamp": timestampGetter,
+			Constants.TYPE: typeGetter,
+			"sourceid": sourceIdGetter
+			// Individual params are handled separately
+		};		
+		
+		// Validate the Analytic instances configuration
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+
+		// Create the new Analytic Object instance.
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,         /* The original Analytic event that was used */ 
+		                      processData,    /* Optional action to process Data events that are received. In this case call the overridden processData() action */
+		                      reset,          /* Optional action called when the Analytic instance is being reset */
+		                      initComplete ); /* Callback action the implementation MUST call when the instance has been initialised */
+		
+	}
+		
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns         A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean { 
+		boolean result := config.validateParams( NAME, /* The name of the Analytic */
+		                                 -1, 1, /* The number of input and output Data channel names */
+		                                 [ BY_SOURCE_ID, OVERWRITE_EXISTING_PARAMS ], 
+		                                 [ Constants.BOOLEAN, Constants.BOOLEAN ], 
+		                                 [ false, false ] );
+			
+		if result {
+			if config.inputDataNames.size() < 1 {
+				log "Must provide at least 1 input channel" at ERROR;
+				return false;
+			}
+			if config.inputDataNames.size() > 2 {
+				log "Must provide at most 2 input channels" at ERROR;
+				return false;
+			}
+			
+			_sourceChannel := config.inputDataNames[0];
+			if config.inputDataNames.size() = 2 {
+				_mergeChannel := config.inputDataNames[1];
+			}
+		}
+		
+		// If the initial set of parameter checks were valid
+		if( result ) then {
+			_outputDataName := config.outputDataNames[0];
+			
+			_bySourceId := config.getOrBoolean(BY_SOURCE_ID, true);
+			
+			string mappingString := config.getDictionaryAsString(MAPPING);
+			if _mapping.canParse(mappingString) {	
+				_mapping := tidyMappingKeys(_mapping.parse(mappingString));
+				result := validateMapping(_mapping);
+			} else {
+				log "  Param "+ MAPPING + " should be provided as a stringified dictionary<string, string>." at ERROR;
+				result := false;				
+			}
+			
+			_overwriteExisting := config.getOrBoolean(OVERWRITE_EXISTING_PARAMS, true);
+		}
+		return result;
+	}
+	
+	action validateMapping(dictionary<string, string> mapping) returns boolean {
+		boolean result := true;
+		
+		if mapping.size() = 0 {
+			log "  Param "+ MAPPING + " should contain at least one mapping." at ERROR;
+			return false;
+		}
+		
+		string key;
+		for key in mapping.keys() {
+			if not (isValidPropertyName(key) or key = "params")  {
+				log "  Param "+ MAPPING + " contains an invalid key: " + key at ERROR;
+				return false;
+			}
+			if _mergeChannel.empty() and key = "params" {
+				log "  Param " + MAPPING + " is invalid. Cannot use key: " + key + " when no merging channel is specified. Use param.myParamName instead." at ERROR;
+				return false;
+			}
+			if not containsValidSubstitution(mapping[key]) {
+				log "  Param "+ MAPPING + " contains an invalid key: " + key at ERROR;
+				return false;		
+			}
+			if key = "params" and mapping[key] != "*" {
+				log "  Param " + MAPPING + " is invalid. When key: " + key + " is provided, value must be: *" at ERROR;
+				return false;
+			}
+		}
+		return result;
+	}
+	
+	action isValidPropertyName(string name) returns boolean {
+		return _valueGetters.hasKey(name) or isParamField(name);
+	}
+	
+	action isParamField(string outputField) returns boolean {
+		return outputField.toLower().find("param.") = 0;
+	}
+	
+	action tidyMappingKeys(dictionary<string, string> mapping) returns dictionary<string, string> {
+		dictionary<string, string> result := new dictionary<string, string>;
+		string key;
+		for key in mapping.keys() {
+			string tidyKey;
+			if isParamField(key) {
+				tidyKey := "param." + key.substring("param.".length(), key.length());
+			} else {
+				tidyKey := key.toLower();
+			}
+			if result.hasKey(tidyKey) {
+				log "Merger has 2 mapping values with the key " + key at ERROR;
+				return new dictionary<string, string>;
+			}
+			result[tidyKey] := mapping[key];
+		}
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic Data event processing. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		}
+		
+		dictionary<string, Data> dataByChannel := _dataBySourceIdAndChannel.getOrAddDefault(sourceId);
+		
+		dataByChannel[dataIn.streamName] := dataIn;
+		
+		if dataByChannel.hasKey(_sourceChannel) and (_mergeChannel.empty() or dataByChannel.hasKey(_mergeChannel.getOrThrow())) {
+			Data source := dataByChannel[_sourceChannel];
+			Data additional;
+			ifpresent _mergeChannel {
+				additional := dataByChannel[_mergeChannel];
+			} else {
+				// In this case, it doesn't matter what we provide as the additional (merging) channel, the mappings will be to hard coded values
+				additional := source;
+			}
+				
+			Data dataOut := merge(source, additional);
+			
+			dataOut.streamName := _outputDataName;		
+			if dataOut.type = DataConstants.RAW and not _mapping.hasKey("type") {
+				dataOut.type := DataConstants.COMPUTED;
+			}
+			_analyticObject.sendData( dataOut );
+		}
+	}
+	
+	action merge(Data source, Data merge) returns Data {
+		Data dataOut := source.clone();
+		
+		// Do the params * mapping first so that any specific ones (eg. param.abc) overwrite
+		if _mapping.hasKey("params") {
+			string paramName;
+			for paramName in merge.params.keys() {
+				if _overwriteExisting or not source.params.hasKey(paramName) {
+					dataOut.params[paramName] := merge.params[paramName];
+				}
+			}
+		}
+		
+		string key;
+		for key in _mapping.keys() {
+			if key = "params" {
+				continue;
+			} else {
+				string value := performSubstitution(_mapping[key], merge);
+				if isParamField(key) {
+					string paramName := key.substring("param.".length(), key.length());
+					if _overwriteExisting or not source.params.hasKey(paramName) {
+						dataOut.params[paramName] := value;
+					}
+				} else {
+					_outputHandlers[key](dataOut, value);
+				}
+			}
+		}
+		return dataOut;
+	}
+	
+	action containsValidSubstitution(string test) returns boolean {
+		boolean result := true;
+		string substitution;
+		for substitution in test.search("\\$\\{.*?\\}") {
+			ifpresent _mergeChannel {
+				if not isValidPropertyName(substitution.substring(2,-1).toLower()) {
+					log "  Param "+ MAPPING + " contains an invalid value: " + substitution at ERROR;
+					return false;
+				}
+			} else {
+				log "  Param "+ MAPPING + " cannot contain substitutions if there is no merging channel" at ERROR;
+				return false;
+			}
+		}
+		return result;
+	}
+	
+	action performSubstitution(string template, Data d) returns string {
+		string result := template;
+		string substitution;
+		for substitution in template.search("\\$\\{.*?\\}") {
+			string subName := substitution.substring(2, -1);
+			string value;
+			if isParamField(subName) {
+				string paramName := subName.substring("param.".length(), subName.length());
+				value := d.params.getOrDefault(paramName);
+			} else {
+				value := _valueGetters[subName.toLower()](d);
+			}
+			result := result.replaceAll(substitution, value);
+		}
+		return result;
+	}
+
+	action dValueGetter(Data d) returns string { return d.dValue.toFloat().toString(); }
+	action sValueGetter(Data d) returns string { return d.sValue; }
+	action xValueGetter(Data d) returns string { return d.xValue.toString(); }
+	action yValueGetter(Data d) returns string { return d.yValue.toString(); }
+	action zValueGetter(Data d) returns string { return d.zValue.toString(); }
+	action typeGetter(Data d) returns string { return d.type; }
+	action timestampGetter(Data d) returns string { return d.timestamp.toFloat().toString(); }
+	action sourceIdGetter(Data d) returns string { return d.sourceId; }
+
+	action dValueOut(Data d, string value) { d.dValue := parseOrZero(value).toDecimal(); }
+	action sValueOut(Data d, string value) { d.sValue := value; }
+	action xValueOut(Data d, string value) { d.xValue := parseOrZero(value); }
+	action yValueOut(Data d, string value) { d.yValue := parseOrZero(value); }
+	action zValueOut(Data d, string value) { d.zValue := parseOrZero(value); }
+	action typeOut(Data d, string value) { d.type := value; }
+	action timestampOut(Data d, string value) { d.timestamp := parseOrZero(value).toDecimal(); }
+	action sourceIdOut(Data d, string value) { d.sourceId := value; }
+	
+	action parseOrZero(string value) returns float {
+		try {
+			return float.parse(blankToZero(value));
+		} catch (Exception e) {
+			log "Unable to convert " + value + " to number" at WARN;
+			return 0.0;
+		}
+	}
+	
+	action blankToZero(string value) returns string {
+		if value = "" {
+			return "0";
+		} else {
+			return value;
+		}
+	}
+	
+	/**
+	 *  Optional action to reset the state of the Analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 */
+	action reset() {
+		_dataBySourceIdAndChannel.clear(); 
+	}
+}
+

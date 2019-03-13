@@ -1,0 +1,848 @@
+//*****************************************************************************
+// Title: Data Simulator Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.utilities;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "DataSimulator",
+	"description": "Generates sample data for use by the analytics.",
+	"group": "Utilities",
+	"documentation": "com/industry/analytics/utilities/DataSimulator.html",
+	"outputChannels": [
+		{
+			"name": "DataSimulator",
+			"description": "The channel on which to output simulator data",
+            "dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"] 
+        }
+	],
+	"properties": [
+		{
+			"name": "simulationType",
+			"description": "The Type of simulation data to be generated.",
+			"type": "string",
+            "defaultValue": "brownian",
+            "optional": true,
+			"validValues": ["brownian", "random", "sin", "sawRising", "sawFalling", "square", "triangle"]
+		},{
+			"name": "rangeUpper",
+			"description": "Defines the upper range of data value",
+			"type": "decimal",
+            "defaultValue": 100,
+            "optional": true
+		},{
+			"name": "rangeLower",
+			"description": "Defines the upper range of data value",
+			"type": "decimal",
+			"defaultValue": 0,
+            "optional": true
+		},{
+			"name": "sourceIdPrefix",
+			"description": "Defines the sourceId prefix to be used in generated data.",
+			"type": "string",
+			"defaultValue": "simulator_",
+            "optional": true
+		},{
+			"name": "sourceIdCount",
+			"description": "Defines the number of sourceIds for which data will be generated.",
+			"type": "integer",
+			"defaultValue": 1,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"optional": true
+		},{
+			"name": "dataRateUnit",
+			"description": "The units to be used for data rate generation.",
+			"type": "string",
+			"defaultValue": "perMinute",
+			"validValues": ["perSecond", "perMinute", "perHour"],
+            "optional": true
+		},{
+			"name": "dataRateValue",
+			"description": "The value to be specified for dataRateUnit param.",
+			"type": "integer",
+			"defaultValue": 60,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+            "optional": true
+		},{
+			"name": "stepType",
+			"description": "Step type for data. It can be either percentage or absolute",
+			"type": "string",
+			"defaultValue": "percentage",
+			"validValues": ["percentage", "absolute"],
+            "optional": true
+		},{
+			"name": "stepValue",
+			"description": "Defines the size of the step between each Data value.",
+			"type": "decimal",
+			"defaultValue": 5.0,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"optional": true
+		},{
+			"name": "eventsPerCycle",
+			"description": "Defines the number of Data points to be generated per cycle.",
+			"type": "integer",
+			"defaultValue": 30,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"optional": true,
+			"advanced": true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+
+/**
+ *  The Data Simulator Analytic generates a set of data for use in an Industry Analytics Kit network.
+ *
+ *  The Data Simulator has two main modes of generating data patterns. The first is 
+ *  brownian motion which produces data with a random variation within a specified 
+ *  maximum delta. The second is a random which produces a random Data value within the 
+ *  defined range.  
+ *
+ *  The Data Simulator can be configured to generate events at a specified data rante. The valid data rates 
+ *  are number of events 'perSecond', 'perMinute' or 'perHour'. The default value for data rate unit is 60.
+ *
+ *  The Data Simulator will generate data for one or more sources. The data for these sources
+ *  are generated in a staggered fashion. Bear in mind that although the timestamps will
+ *  be generated accurately, the actual output of the events will be subject to the usual 
+ *  limitations of time resolution within the correlator.
+ *
+ *  Brownian:</br>
+ *  if stepType = percentage then val = ((rangeUpper - rangeLower)/100))* stepValue </br>
+ *  else val = stepValue </br>
+ *  delta = val.rand() - val.rand() </br>
+ *  if (f(n-1)+delta > rangeUpper) OR (f(n-1)+delta < rangeLower) then delta = delta * -1 </br>
+ *  f(n) = f(n-1) +  delta
+ *
+ *  Random :
+ *  random := (rangeUpper - rangeLower).rand()
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>There is no input data events as simulator generates Data events and send on output channel.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. All the
+ *      <font face="courier" size="-1">params</font> from the input Data are copied to the delta Data.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>simulationType</b></td><td>The Type of simulation data to be generated.</td>
+ *      <td>One of <font face="courier" size="-1">"brownian", "random", "sin", "sawRising", "sawFalling", "square", "triangle"</font></td><td>String</td><td>False</td><td><font face="courier" size="-1">brownian</font></td></tr>
+ *  <tr><td><b>rangeUpper</b></td><td>Defines the upper range of data value.</td>
+ *      <td>> <font face="courier" size="-1">rangeLower</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">100.0d</font></td></tr>
+ *  <tr><td><b>rangeLower</b></td><td>Defines the upper range of data value.</td>
+ *      <td> < <font face="courier" size="-1">rangeUpper</font></td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">0.0</font></td></tr>
+ *  <tr><td><b>sourceIdPrefix</b></td><td>Defines the sourceId prefix to be used in generated data.</td>
+ *      <td>String</td><td>String</td><td>False</td><td><font face="courier" size="-1">simulator_</font></td></tr>
+ *  <tr><td><b>sourceIdCount</b></td><td>Defines the number of sourceIds for which data will be generated.</td>
+ *      <td> > 0 </td>
+ *      <td>Integer</td><td>False</td><td><font face="courier" size="-1">1</font></td></tr>
+ *  <tr><td><b>dataRateUnit</b></td><td>The units to be used for data rate generation.</td>
+ *      <td><font face="courier" size="-1">perSecond, perMinute, perHour</font></td><td>String</td><td>False</td><td><font face="courier" size="-1">perMinute</font></td></tr>
+ *  <tr><td><b>dataRateValue</b></td><td>The value to be specified for dataRateUnit param. The events will be generated per sourceId at specified rate.</td>
+ *      <td> > 0 </td><td>Integer</td><td>False</td><td><font face="courier" size="-1">60</font></td></tr>
+ *  <tr><td><b>stepType</b></td><td>Step type for simulated data.</td>
+ *      <td><font face="courier" size="-1">percentage or absolute</font></td><td>String</td><td>False</td><td><font face="courier" size="-1">percentage</font></td></tr>
+ *  <tr><td><b>stepValue</b></td><td>Defines the size of the step between each Data value.</td>
+ *      <td> > 0</td><td>String</td><td>False</td><td><font face="courier" size="-1">5.0</font></td></tr>
+ *  <tr><td><b>eventsPerCycle</b></td><td>Defines the number of Data points to be generated per cycle.</td>
+ *      <td> > 0</td><td>String</td><td>False</td><td><font face="courier" size="-1">30</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+//Define a DataSimulator Analytic which will publish Data events on  
+//the output channel "Output1". The values it will generate will range between 
+//50.0 and 100.0. Events are published by default every second
+send com.industry.analytics.Analytic("DataSimulator", new sequence&ltstring&gt, ["Output1"], {"rangeUpper":"100.0d", "rangeLower":"50.0d"} ) to "";
+
+//Define a DataSimulator Analytic which will publish Data events on  
+//the output channel "Output1". The  values it will generate will range between 
+//0.0 and 100.0 for 3 source ids. Events are published every 5 seconds per source id.
+send com.industry.analytics.Analytic("DataSimulator", new sequence&ltstring&gt, ["Output1"], {"rangeUpper":"100.0d", "rangeLower":"50.0d", "sourceIdCount":"3", "dataRateUnit":"perMinute", "dataRateValue":"12"} ) to "";
+</code></dd>
+ *  </dl>
+ */
+event DataSimulator
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "DataSimulator";
+	
+	/** This constant defines the type of simulated data */
+	constant string SIMULATION_TYPE := "simulationType";
+	
+	/** This constant defines the upper range of dValue */
+	constant string RANGE_UPPER := "rangeUpper";
+	
+	/** This constant defines the lower range for Data dValue*/
+	constant string RANGE_LOWER := "rangeLower";
+	
+	/** This constant defines the sourceId prefix to be used */
+	constant string SOURCE_ID_PREFIX := "sourceIdPrefix ";
+	
+	/** This constant defines the sourceId count to be used */
+	constant string SOURCE_ID_COUNT := "sourceIdCount";
+	
+	/** This constant defines the data generation rate units */
+	constant string DATA_RATE_UNIT := "dataRateUnit";
+	
+	/** This constant defines thedata generation unit value */
+	constant string DATA_RATE_VALUE := "dataRateValue";
+	
+	/** This constant defines the the step type (absolute or percentage) that the
+	 *  step value should be treated as. */
+	constant string STEP_TYPE := "stepType";
+	
+	/** This constant defines the size of the step between each Data value */
+	constant string STEP_VALUE := "stepValue";
+
+	/** This constant defines the number of Data points that are to be generated per cycle */
+	constant string EVENTS_PER_CYCLE := "eventsPerCycle";
+
+	/** Local cache to save output data name
+	 *  @private */
+	string _outputDataName;
+	/** Local cache to save simulation type 
+	 *  @private */
+	string _simulationType;//Brownian, Sin, Square etc
+	
+	/** Local cache to save upper range 
+	 *  @private */
+	decimal _rangeUpper;
+	
+	/** Local cache to save lower range 
+	 *  @private */
+	decimal _rangeLower;
+	
+	/** Local cache to save sourceId prefix 
+	 *  @private */
+	string _sourceIdPrefix;
+	
+	/** Local cache to save sourceId count 
+	 *  @private */
+	integer _sourceIdCount;
+	
+	/** Local cache to save data rate unit 
+	 *  @private */
+	string _dataRateUnit;
+	
+	/** Local cache to save data rate unit value
+	 *  @private */
+	integer _dataRateValue;
+	
+	/** Local cache to save step type
+	 *  @private */
+	string _stepType;
+	
+	/** Local cache to save step value
+	 *  @private */
+	decimal _stepValue;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+	/** The configuration event. 
+	*  @private */
+	Analytic _config;
+	
+	/** The initialisation callback action.
+	 *  @private */
+	action<boolean, AnalyticInterface> _initComplete;
+	/** The simulation call back function. 
+	*  @private */
+	action<Data> _simulationFunc;
+	
+	//simulation types
+	/** Constant for brownian motion
+ 	 * @private */
+	constant string BROWNIAN := "brownian";
+	
+	/** Constant for random data
+	 * @private */
+	constant string RANDOM := "random";
+	
+	/** Constent for sin wave
+	 * @private */
+	constant string SIN := "sin";
+	
+	/** Constant for saw falling
+	 * @private */
+	constant string SAW_FALLING := "sawFalling";
+	
+	/** Constant for saw rising
+	 * @private */
+	constant string SAW_RISING := "sawRising";
+	
+	/** Constant for square wave
+	 * @private */
+	constant string SQUARE := "square";
+	
+	/** Constant for triangular wave
+	 * @private */
+	constant string TRIANGLE := "triangle";
+	
+	//data rate unit constants
+	/** Constant for per second data rate
+	 * @private */
+	constant string PER_SECOND := "perSecond";
+	/** Constant for per minute data rate
+	 * @private */
+	constant string PER_MINUTE := "perMinute";
+	/** Constant for per hour data rate
+	 * @private */
+	constant string PER_HOUR := "perHour";
+	
+	/**Constant for percentage step type
+	* @private
+	**/
+	constant string PERCENTAGE := "percentage";
+	
+	/**Constant for absolute step type
+	 * @private
+	 **/
+	constant string ABSOLUTE := "absolute";
+	
+	/** This constant defines the default value for the
+	 *  sourceIdPrefix configuration parameter.
+	 * @private **/
+	constant string DEFAULT_SOURCE_ID_PREFIX := "simulator_";
+	
+	/** This constant defines the number of 
+	 *  seconds in a minute, used to determine the
+	 *  event generation rate.
+	 * @private **/
+	constant integer SECONDS_IN_MIN := 60;
+	
+	/** This constant defines the number of 
+	 *  seconds in an hour, used to determine the
+	 *  event generation rate.
+	 * @private **/
+	constant integer SECONDS_IN_HOUR := 3600;
+	
+	/** This constant defines the default value for the
+	 *  step value configuration parameter.
+ 	 * @private **/
+	constant decimal DEFAULT_STEP_VALUE := 5.0d;
+	
+	/** This constant defines the default value for the
+	 *  number of points in the pattern configuration parameter.
+	 * @private **/
+	constant integer DEFAULT_EVENTS_PER_CYCLE := 30;
+	
+	/** This constant defines the default value for the
+	 *  rangeUpper configuration parameter.
+  	 * @private **/
+	constant decimal DEFAULT_RANGE_UPPER := 100.0d;
+	
+	/** This constant defines the default value for the
+	 *  rangeLower configuration parameter.
+ 	 * @private **/
+	constant decimal DEFAULT_RANGE_LOWER := 0.0d;
+	
+	/** This constant defines the random percentage
+	 *  range that will be applied to the data rate interval
+	 * @private **/
+	constant float CONST_DATARATE_OFFSET := 0.20;
+	
+	/** Local variable to cache the calculated step delta value.
+ 	 * @private 
+	 */
+	float _delta;
+
+	/** Local variable to cache the number of points in a full cycle 
+	 *  for a wave pattern being generated. Only applicable for pattern 
+	 *  simulation types.
+	 * @private 
+	 */
+	integer _numPointsPerCycle;
+	
+	/** Local variable to cache the spread of the defined range
+	 * @private 
+	 */
+	decimal _rangeSpread;
+
+	/** Local variable to cache the current point in a wave pattern
+     *  being generated. Only applicable for pattern simulation types.
+	 * @private 
+	 */
+	integer _currPointInCycle;
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+    *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_config := config;
+		_initComplete := initComplete;
+
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      new action<Data>,
+		                      new action<>,
+		                      _simulatorInitComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 0, 1, 
+		                                         [ SIMULATION_TYPE,   RANGE_UPPER,    
+		                                           RANGE_LOWER,       SOURCE_ID_PREFIX, 
+		   				                       	   SOURCE_ID_COUNT,   DATA_RATE_UNIT, 
+		                                           DATA_RATE_VALUE,   STEP_TYPE, 
+		                                           STEP_VALUE ],
+		   				                      	 [ Constants.STRING,  Constants.DECIMAL,
+		   				                      	   Constants.DECIMAL, Constants.STRING, 
+		   				                      	   Constants.INTEGER, Constants.STRING,
+		   				                      	   Constants.INTEGER, Constants.STRING, 
+		   				                      	   Constants.DECIMAL ],
+		   				                      	 [ false, false, 
+		   				                      	   false, false,
+		   				                      	   false, false,
+		   				                      	   false, false, 
+		   				                      	   false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+				
+			// Get the simulation type
+			_simulationType := config.getOrString( SIMULATION_TYPE, BROWNIAN ).ltrim().rtrim();
+			if( _simulationType.length() = 0 ) then {
+				log "Parameter "+SIMULATION_TYPE+" can not be empty string." at ERROR;
+				result := false;
+			} else if( not ( _simulationType.toLower() = BROWNIAN.toLower() 
+			             or  _simulationType.toLower() = RANDOM.toLower()  
+			             or  _simulationType.toLower() = SIN.toLower()
+			             or  _simulationType.toLower() = SAW_FALLING.toLower() 
+			             or  _simulationType.toLower() = SAW_RISING.toLower() 
+			             or  _simulationType.toLower() = SQUARE.toLower() 
+						 or  _simulationType.toLower() = TRIANGLE.toLower() ) ) then {
+				log "Parameter "+SIMULATION_TYPE+" values should be one of the following : "+
+				    BROWNIAN+", "+RANDOM+", "+SIN+", "+SAW_FALLING+", "+SAW_RISING+", "+SQUARE+", "+TRIANGLE+"." at ERROR;
+				result := false;
+			} else {
+				if( _simulationType.toLower() = BROWNIAN.toLower() ) then {
+					_simulationFunc := _brownian;
+				} else if( _simulationType.toLower() = RANDOM.toLower() ) then {
+					_simulationFunc := _random;
+				} else if( _simulationType.toLower() = SIN.toLower() ) then {
+					_simulationFunc := _sinWave;
+				} else if( _simulationType.toLower() = SAW_FALLING.toLower() ) then {
+					_simulationFunc := _sawFallingWave;
+				} else if( _simulationType.toLower() = SAW_RISING.toLower() ) then {
+					_simulationFunc := _sawRisingWave;
+				} else if( _simulationType.toLower() = SQUARE.toLower() ) then {
+					_simulationFunc := _squareWave;
+				} else if( _simulationType.toLower() = TRIANGLE.toLower() ) then {
+					_simulationFunc := _triangleWave;
+				} else {
+					// Default calculation to Brownian util development of other types are completed.
+					_simulationFunc := _brownian;
+				}
+				
+			}
+			
+			// Get the range of values to be simulated
+			_rangeUpper := config.getOrDecimal(RANGE_UPPER, DEFAULT_RANGE_UPPER);
+			_rangeLower := config.getOrDecimal(RANGE_LOWER, DEFAULT_RANGE_LOWER);
+			
+			// Check that the lower range is less than the upper range
+			if( _rangeLower > _rangeUpper ) then {
+				log "Parameter "+RANGE_UPPER+" should be greater than "+RANGE_LOWER at ERROR;
+				result := false;
+			}
+			
+			// Get the sourceId prefix
+			_sourceIdPrefix := config.getOrString( SOURCE_ID_PREFIX, DEFAULT_SOURCE_ID_PREFIX ).ltrim().rtrim();
+			if( _sourceIdPrefix.length() = 0 ) then {
+				log "Parameter "+SOURCE_ID_PREFIX+" should not be empty string." at ERROR;
+				result := false;
+			}
+			
+			// Get the number of sources to generate
+			_sourceIdCount := config.getOrInteger(SOURCE_ID_COUNT, 1);
+			if( _sourceIdCount < 1 ) then {
+				log "Parameter "+SOURCE_ID_COUNT+" must be greater than 1." at ERROR;
+				result := false;
+			}
+			
+			// Get the Data rate unit type
+			_dataRateUnit := config.getOrString( DATA_RATE_UNIT, PER_MINUTE ).ltrim().rtrim();
+			if( _dataRateUnit.length() = 0 ) then {
+				log "Parameter "+DATA_RATE_UNIT+" should not be empty string." at ERROR;
+				result := false;
+			} else {
+				if( not ( _dataRateUnit.toLower() = PER_SECOND.toLower()  
+				       or _dataRateUnit.toLower() = PER_MINUTE.toLower()  
+				       or _dataRateUnit.toLower() = PER_HOUR.toLower() ) ) then {
+					log "Parameter "+DATA_RATE_UNIT+" values should be one of the following : "+
+						PER_SECOND+", "+PER_MINUTE+", "+PER_HOUR+"." at ERROR;
+					result := false;
+				}
+			}
+			
+			// Get the Data rate value
+			_dataRateValue := config.getOrInteger( DATA_RATE_VALUE, 60 );
+			if( _dataRateValue < 1 ) then {
+				log "Parameter "+DATA_RATE_VALUE+" must be greater than 1." at ERROR;
+				result := false;
+			} 
+			
+			// Get the step/delta type
+			_stepType := config.getOrString( STEP_TYPE, PERCENTAGE );
+			if( not ( _stepType.toLower() = PERCENTAGE.toLower() 
+			       or _stepType.toLower() = ABSOLUTE.toLower() ) ) then {
+				log "Parameter "+STEP_TYPE+" must be either "+PERCENTAGE+" or"+ABSOLUTE at ERROR;
+				result := false;
+			}
+			
+			// Get the step/delta value
+			_stepValue := config.getOrDecimal( STEP_VALUE, DEFAULT_STEP_VALUE );
+			if( _stepValue < 0.0d ) then {
+				log "Parameter "+STEP_VALUE+" must be greater than 0." at ERROR;
+				result := false;
+			}
+			
+			// Get the step/delta value
+			_numPointsPerCycle := config.getOrInteger( EVENTS_PER_CYCLE, DEFAULT_EVENTS_PER_CYCLE );
+			if( _stepValue < 0.0d ) then {
+				log "Parameter "+EVENTS_PER_CYCLE+" must be greater than 0." at ERROR;
+				result := false;
+			}
+
+			// Cache partial calculations to improve performance in the 
+			// different algos to generate data patterns
+			_rangeSpread := _rangeUpper - _rangeLower;
+		}
+		
+		if( result ) then {
+			// Calculate delta
+			if( _stepType.toLower() = PERCENTAGE.toLower() ) then {
+				_delta := ( _rangeSpread * _stepValue).toFloat()/100.0;
+			} else {
+				_delta := _stepValue.toFloat();
+			}
+		}
+		
+		return result;
+	}
+	
+	/**
+	 *  Helper action to kick off the Data Simulator before calling the init complete.
+	 *  @private
+	 */
+	action _simulatorInitComplete( boolean flag, AnalyticInterface iface ) {
+
+		// Create the set of simulators with each one in it's own context
+		integer i := 0;
+		while i < _sourceIdCount {
+			
+			// Create an initial Data event with a value
+			// randomly scattered in the defined range
+			string sourceId := _sourceIdPrefix;
+			if( _sourceIdCount > 1 ) then {
+				sourceId := sourceId + (i+1).toString();
+			}
+			Data currData := Data.init( _outputDataName, DataConstants.RAW, sourceId );
+			currData.dValue := ( (_rangeUpper.toFloat() - _rangeLower.toFloat() ).rand().toDecimal()) + _rangeLower;
+		
+			// Calculate the number of events per second we want to send
+			float dataIntervalAsSec;
+			if( _dataRateUnit = PER_MINUTE ) then {
+				dataIntervalAsSec := SECONDS_IN_MIN.toFloat() / _dataRateValue.toFloat();
+			} else if( _dataRateUnit = PER_HOUR ) then {
+				dataIntervalAsSec := SECONDS_IN_HOUR.toFloat() / _dataRateValue.toFloat();
+			} else {
+				// Default to seconds
+				dataIntervalAsSec := 1.0 / _dataRateValue.toFloat();
+			}
+			
+			// Set the current point to a random point in the cycle range for wave patterns
+			_currPointInCycle := _numPointsPerCycle.rand() +1;
+			
+			// Spawn to a new context, and start the simulator
+			spawn startSimulator( currData, dataIntervalAsSec );
+			
+			// Increment the index of sourceIds
+			i := i + 1;
+		}
+		
+		// Call the initialisation callback
+		_initComplete( flag, iface );
+
+	}
+	
+	/**
+	 *  Action that starts the simulation of Data values.
+	 *  @private
+	 */
+	action startSimulator( Data dataIn, float dataIntervalAsSec ) {
+		// Calculate wait time based on dataRateUnit and dataRateValue 
+		float waitTime := 0.0;
+		
+		// Stagger the Data event generation times
+		// so that they are not all sent at the same time/
+		// Calculate the wait time based on the 
+		// dataRateValue +/- a random offset 
+		float randomOffset := dataIntervalAsSec * ( CONST_DATARATE_OFFSET.rand() - CONST_DATARATE_OFFSET.rand() );
+		waitTime := dataIntervalAsSec + randomOffset;
+		
+		on wait( waitTime ) 
+		and not com.industry.analytics.KillManagementChannelListeners(id=_analyticObject._id) {
+			Data currData := dataIn.clone();
+			//currData.timestamp := currData.timestamp + waitTime.toDecimal();
+			currData.timestamp := currentTime.toDecimal();
+		
+			// Call the overridden simulation mode
+			_simulationFunc( currData );
+						
+			// Send the Data to the output channel
+			_analyticObject.sendData( currData );
+			
+			// Call recursively
+			startSimulator( currData, dataIntervalAsSec );
+		}
+	}
+	
+	/**
+	 *  Brownian motion.
+	 *  V = V + 2 * (Rand(Range) - Rand(Range)) /CycleCount
+	 *  Clip inside range, move away from boundary if exceeding boundary
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _brownian( Data currData ) {
+
+		// Due to a bug in Apama 9.12 with calling rand() on Decimals
+		// we use a float for the delta, and then convert back to Decimal
+		decimal deltaValue := _delta.rand().toDecimal() - _delta.rand().toDecimal();
+		// Make sure values are within range, otherwise invert
+		// the delta to be applied
+		if( ( ( currData.dValue + deltaValue ) > _rangeUpper ) 
+		or  ( ( currData.dValue + deltaValue ) < _rangeLower ) ) then {
+			deltaValue := deltaValue * -1.0d;
+		} 
+		currData.dValue := currData.dValue + deltaValue;
+		
+	}
+	
+	/**
+	 *  Random.
+	 *  Data containing Random number between range.
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _random( Data currData ) {
+		// Due to a bug in Apama 9.12 with calling rand() on Decimals
+		// we need to convert them to float, and then back to Decimal
+		currData.dValue := ( _rangeSpread.toFloat().rand() + _rangeLower.toFloat().rand() ).toDecimal();
+	}
+	
+	/**
+	 *  Sin.
+	 *  Generates Data based on a Sine wave pattern between the range defined over
+	 *  a set number of points.
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _sinWave( Data currData ) {
+		
+		decimal pointInRange := _currPointInCycle.toDecimal() / (_numPointsPerCycle.toDecimal()/2.0d);
+		decimal halfSpread   := _rangeSpread / 2.0d;
+		
+		currData.dValue := (( pointInRange*decimal.PI ).sin() * halfSpread ) + halfSpread + _rangeLower;
+
+		_currPointInCycle := _currPointInCycle + 1;
+		if( _currPointInCycle >= _numPointsPerCycle ) then {
+			_currPointInCycle := 0;
+		}
+	}
+	
+	/**
+	 *  Saw Rising.
+	 *  Generates Data based on a Rising Sawtooth wave pattern between the range defined over
+	 *  a set number of points.
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _sawRisingWave( Data currData ) {
+		decimal delta := _rangeSpread / _numPointsPerCycle.toDecimal();
+		
+		currData.dValue := _rangeLower + ( _currPointInCycle.toDecimal() * delta );
+		
+		_currPointInCycle := _currPointInCycle + 1;
+		if( _currPointInCycle >= _numPointsPerCycle ) then {
+			_currPointInCycle := 0;
+		}
+	}
+	
+	/**
+	 *  Saw Falling.
+	 *  Generates Data based on a Falling Sawtooth wave pattern between the range defined over
+	 *  a set number of points.
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _sawFallingWave( Data currData ) {
+		decimal delta := _rangeSpread / _numPointsPerCycle.toDecimal();
+		
+		currData.dValue := _rangeUpper - ( _currPointInCycle.toDecimal() * delta );
+		
+		_currPointInCycle := _currPointInCycle + 1;
+		if( _currPointInCycle >= _numPointsPerCycle ) then {
+			_currPointInCycle := 0;
+		}
+	}
+	
+	/**
+	 *  Square.
+	 *  Generates Data based on a Square wave pattern between the range defined over
+	 *  a set number of points.
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _squareWave( Data currData ) {
+		decimal halfWavePoint := _numPointsPerCycle.toDecimal() / 2.0d;
+		if( _currPointInCycle.toDecimal() >= halfWavePoint ) then {
+			currData.dValue := _rangeUpper;
+		} else {
+			currData.dValue := _rangeLower;
+		}
+		
+		_currPointInCycle := _currPointInCycle + 1;
+		if( _currPointInCycle >= _numPointsPerCycle ) then {
+			_currPointInCycle := 0;
+		}
+	}
+	
+	/**
+	 *  Triangle.
+	 *  Generates Data based on a Triangle wave pattern between the range defined over
+	 *  a set number of points.
+	 *  @param currData The Data to be jiggled.
+	 *  @private
+	 */
+	action _triangleWave( Data currData ) {
+		decimal halfWavePoint := _numPointsPerCycle.toDecimal() / 2.0d;
+		decimal delta := _rangeSpread / halfWavePoint; // We need to calculate the delta based on two sides of the triangle 
+
+		// Check if we are on the rising or falling side of the wave
+		if( _currPointInCycle.toDecimal() >= halfWavePoint ) then {
+			currData.dValue := _rangeUpper - ( ( _currPointInCycle.toDecimal() - halfWavePoint ) * delta );
+		} else {
+			currData.dValue := _rangeLower + ( _currPointInCycle.toDecimal() * delta );
+		}
+		
+		_currPointInCycle := _currPointInCycle + 1;
+		if( _currPointInCycle >= _numPointsPerCycle ) then {
+			_currPointInCycle := 0;
+		}
+	}
+	
+}
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the DataSimulator Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternDataSimulator {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := DataSimulator.NAME.intern();
+		discard := DataSimulator.ABSOLUTE.intern();
+		discard := DataSimulator.BROWNIAN.intern();
+		discard := DataSimulator.DATA_RATE_UNIT.intern();
+		discard := DataSimulator.DATA_RATE_VALUE.intern();
+		discard := DataSimulator.DEFAULT_SOURCE_ID_PREFIX.intern();
+		discard := DataSimulator.EVENTS_PER_CYCLE.intern();
+		discard := DataSimulator.PER_HOUR.intern();
+		discard := DataSimulator.PER_MINUTE.intern();
+		discard := DataSimulator.PER_SECOND.intern();
+		discard := DataSimulator.PERCENTAGE.intern();
+		discard := DataSimulator.RANDOM.intern();
+		discard := DataSimulator.RANGE_LOWER.intern();
+		discard := DataSimulator.RANGE_UPPER.intern();
+		discard := DataSimulator.SAW_FALLING.intern();
+		discard := DataSimulator.SAW_RISING.intern();
+		discard := DataSimulator.SIMULATION_TYPE.intern();
+		discard := DataSimulator.SIN.intern();
+		discard := DataSimulator.SOURCE_ID_COUNT.intern();
+		discard := DataSimulator.SOURCE_ID_PREFIX.intern();
+		discard := DataSimulator.SQUARE.intern();
+		discard := DataSimulator.STEP_TYPE.intern();
+		discard := DataSimulator.STEP_VALUE.intern();
+		discard := DataSimulator.TRIANGLE.intern();
+		on all StayAlive() {}
+	}
+}

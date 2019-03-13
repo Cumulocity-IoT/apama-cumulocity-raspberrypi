@@ -1,0 +1,168 @@
+//*****************************************************************************
+// Title:         Cache
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.memorystore.Iterator;
+using com.apama.memorystore.Row;
+using com.apama.memorystore.Table;
+
+/** @private */
+event ClearCache
+{
+	string tableName;
+}
+
+/** @private */
+event Cache
+{
+	MemStoreUtil _msu;
+	action<string/*tableName*/,boolean> _cacheReady;
+	string _tableName;
+	sequence<string> _fieldNames;
+	sequence<string> _fieldTypes;
+    boolean _exposeMemoryView;
+    boolean _exposePersistentView;
+	boolean _clearCache;
+	
+	
+	action init(string tableName,
+	            sequence<string> fieldNames,
+	            sequence<string> fieldTypes,
+	            boolean exposeMemoryView,
+	            boolean exposePersistentView,
+    			action<string/*tableName*/,boolean> cacheReady)
+	{
+		_cacheReady := cacheReady;
+		_tableName := tableName;
+		_fieldNames := fieldNames;
+		_exposeMemoryView := exposeMemoryView;
+        _exposePersistentView := exposePersistentView;
+
+		// Adjust types which can't be used directly with MemStore
+		_fieldTypes := fieldTypes;
+		dictionary<string, boolean> validTypes :=
+			{Constants.BOOLEAN: false,
+			 Constants.DECIMAL: false,
+			 Constants.FLOAT: false,
+			 Constants.INTEGER: false,
+			 Constants.STRING: false};
+		integer index := 0;
+		while index < _fieldTypes.size()
+		{
+			if not validTypes.hasKey(_fieldTypes[index]) then
+			{
+				_fieldTypes[index] := Constants.STRING;
+			}
+			index := index + 1;
+		}
+
+		_msu := new MemStoreUtil;
+		_clearCache := false;
+
+		on ClearCache(tableName=_tableName) or
+		   ClearCache(tableName="")
+		{
+			_clearCache := true;
+		}
+
+		_msu.initCache(Constants.STORE, MemStoreUtil.CORRELATOR_PERSISTENT, _storeReady);
+	}
+
+
+	action _storeReady(boolean isReady)
+	{
+		if isReady then
+		{
+			log "Store " + Constants.STORE + " ready." at DEBUG;
+			_openTable();
+		}
+		else
+		{
+			log "Store " + Constants.STORE + " not ready." at ERROR;
+			_cacheReady(_tableName, false);
+		}
+	}
+	
+	
+	action _openTable()
+	{
+		_msu.openTable(Constants.STORE, _tableName,
+		               _fieldNames, _fieldTypes,
+		               _exposeMemoryView, _exposePersistentView, _tableReady,
+		               _tableName, _tableName, _tableName, _tableName);
+	}
+
+
+	action _tableReady(boolean isReady, string storeName, string tableName)
+	{
+		if isReady then
+		{
+			log "Table " + tableName + " in store " + storeName + " is ready." at DEBUG;
+			log tableName + " cache ready." at INFO;
+			
+			if _clearCache then
+			{
+				clearCache();
+			}
+			on all ClearCache(tableName=_tableName) or
+			   all ClearCache(tableName="")
+			{
+				clearCache();
+			}
+			
+			_cacheReady(_tableName, true);
+		}
+		else
+		{
+			log "Table " + tableName + " in store " + storeName + " is NOT ready." at WARN;
+			_cacheReady(_tableName, false);
+		}
+	}
+	
+	
+	action add(action<Table> returns Row getRow)
+	{
+		_msu.populateRowAndCommit(_tableName, getRow);
+	}
+	
+	
+	action get(string key) returns Row
+	{
+		return _msu.getRow(_tableName, key);
+	}
+	
+	
+	action remove(string key)
+	{
+		_msu.removeRow(_tableName, key);
+	}
+	
+	
+	action getIterator returns Iterator
+	{
+		return _msu.getTable(_tableName).getTable().begin();
+	}
+	
+	
+	action clearCache()
+	{
+		log "Clearing " + _tableName + " cache." at INFO;
+		_msu.clearTable(_tableName);
+	}
+}

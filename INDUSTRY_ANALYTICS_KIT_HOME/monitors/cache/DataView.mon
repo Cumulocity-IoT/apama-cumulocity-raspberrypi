@@ -1,0 +1,308 @@
+//*****************************************************************************
+// Title:         DataView
+//
+// Copyright (c) 2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.dataview.DataViewAddDefinition;
+using com.apama.dataview.DataViewAddOrUpdateItem;
+using com.apama.dataview.DataViewAllItemsDeleted;
+using com.apama.dataview.DataViewDefinition;
+using com.apama.dataview.DataViewDeleteAllItems;
+using com.apama.dataview.DataViewDeleteItem;
+using com.apama.dataview.DataViewDefinitionDeleted;
+using com.apama.dataview.DataViewDeleteDefinition;
+using com.apama.dataview.DataViewException;
+using com.apama.dataview.DataViewGetFieldLookup;
+using com.apama.dataview.DataViewFieldLookup;
+using com.apama.dataview.DataViewItem;
+using com.apama.dataview.DataViewItemDeleted;
+using com.apama.dataview.DataViewItemException;
+
+
+/** @private */
+event ClearDataView
+{
+	string tableName;
+}
+
+/** @private */
+event DataView
+{
+	/** This constant defines the param name for DataView messages defining
+	 *  where the responses should be sent. */
+	constant string DATAVIEW_CHANNEL := "DATAVIEW_CHANNEL";
+
+	action<boolean> _dataViewReady;
+	string _tableName;
+	sequence<string> _fieldNames;
+	sequence<string> _fieldTypes;
+	sequence<string> _keyFields;
+	boolean _clearDataView;
+	
+	
+	action init(string tableName,
+	            sequence<string> fieldNames,
+	            sequence<string> fieldTypes,
+	            sequence<string> keyFields,
+	            boolean useDuplicate,
+	            action<boolean> dataViewReady)
+	{
+		monitor.subscribe(DATAVIEW_CHANNEL);
+		
+		_dataViewReady := dataViewReady;
+		_tableName := tableName;
+		_fieldNames := fieldNames;
+		_keyFields := keyFields;
+
+		// Adjust types which can't be used directly with DataViews
+		_fieldTypes := fieldTypes;
+		dictionary<string, boolean> validTypes :=
+			{Constants.BOOLEAN: false,
+			 Constants.DECIMAL: false,
+			 Constants.FLOAT: false,
+			 Constants.INTEGER: false,
+			 Constants.STRING: false};
+		integer index := 0;
+		while index < _fieldTypes.size()
+		{
+			if not validTypes.hasKey(_fieldTypes[index]) then
+			{
+				_fieldTypes[index] := Constants.STRING;
+			}
+			index := index + 1;
+		}
+
+		DataViewAddDefinition dvad := new DataViewAddDefinition;
+		dvad.dvName := tableName;
+		dvad.dvDisplayName := tableName;
+		dvad.fieldNames := _fieldNames;
+		dvad.fieldTypes := _fieldTypes;
+		dvad.keyFields := _keyFields;
+		dvad.msgId := integer.getUnique().toString();
+		
+		_clearDataView := false;
+		on ClearDataView(tableName=_tableName) or
+		   ClearDataView(tableName="")
+		{
+			_clearDataView := true;
+		}
+
+		DataViewException dve;
+		on DataViewException(msgId=dvad.msgId, dvName=dvad.dvName) :dve and
+		   not DataViewDefinition(msgId=dvad.msgId, dvName=dvad.dvName)
+		{
+			// Unlike the MemoryStore, the DataView Service won't automatically
+			// reuse an identical definition but will throw an exception.
+			if useDuplicate and
+			   dve.message = "DataView name already exists" then
+			{
+				// In this case check that this truly is a duplicate.
+				// Can't check types, but can check names.
+				DataViewGetFieldLookup dvgfl := new DataViewGetFieldLookup;
+				dvgfl.msgId := integer.getUnique().toString();
+				dvgfl.dvName := dvad.dvName;
+				
+				DataViewFieldLookup dvfl;
+				on DataViewFieldLookup(msgId=dvgfl.msgId, dvName=dvgfl.dvName) :dvfl and
+				   not DataViewException(msgId=dvgfl.msgId, dvName=dvgfl.dvName)
+				{
+					integer i := 0;
+					string field;
+					for field in _fieldNames
+					{
+						if dvfl.fields[field] != i then
+						{
+							log "Error creating DataView '" + dve.dvName +
+								"': Duplicate table exists with mismatching fieldnames: " + dvfl.fields.toString() at ERROR;
+							_dataViewReady(false);
+						}
+						i := i + 1;
+					}
+					log "Using pre-existing DataView " + dvfl.dvName at INFO;
+					_setupClearDataView();
+					_dataViewReady(true);
+				}
+				
+				DataViewException dve2;
+				on DataViewException(msgId=dvgfl.msgId, dvName=dvgfl.dvName) :dve2 and
+				   not DataViewFieldLookup(msgId=dvgfl.msgId, dvName=dvgfl.dvName)
+				{
+					log "Error creating DataView '" + dve2.dvName +
+						"': " + dve.message at ERROR;
+					_dataViewReady(false);
+				}
+				
+				send dvgfl to "";
+ 
+			}
+			else
+			{
+				log "Error creating DataView '" + dve.dvName +
+					"': " + dve.message at ERROR;
+				_dataViewReady(false);
+			}
+		}
+		
+		DataViewDefinition dvd;
+		on DataViewDefinition(msgId=dvad.msgId, dvName=dvad.dvName) :dvd and
+		   not DataViewException(msgId=dvad.msgId, dvName=dvad.dvName)
+		{
+			log "DataView '" + dvd.dvName +
+				"' created." at INFO;
+			_setupClearDataView();
+			_dataViewReady(true);
+		}
+		
+		send dvad to "";
+	}
+	
+	
+	action _setupClearDataView()
+	{
+		if _clearDataView then
+		{
+			clear();
+		}
+		on all ClearDataView(tableName=_tableName) or
+		   all ClearDataView(tableName="")
+		{
+			clear();
+		}
+	}
+
+
+	action add(DataViewAddOrUpdateItem item)
+	{
+		item.msgId := integer.getUnique().toString();
+		item.dvName := _tableName;
+		if item.fieldValues.size() != _fieldNames.size() then
+		{
+			log "Failed to add or update to '" + item.dvName +
+				"': fieldValues size does not match the init fieldNames size." at ERROR;
+			return;
+		}
+		
+		send item to "";
+	}
+	
+	
+	action remove(integer dvItemId, sequence<string> keyFields)
+	{
+		DataViewDeleteItem dvdi := new DataViewDeleteItem;
+		dvdi.msgId := integer.getUnique().toString();
+		dvdi.dvName := _tableName;
+		dvdi.dvItemId := dvItemId;
+		dvdi.keyFields := keyFields;
+		
+		DataViewItemDeleted dvid;
+		on DataViewItemDeleted(msgId=dvdi.msgId, dvName=dvdi.dvName) and
+		   not DataViewItemException(msgId=dvdi.msgId, dvName=dvdi.dvName)
+		{
+			log "DataView item deleted: " + dvdi.toString() at DEBUG;
+		}
+		
+		DataViewItemException dvie;
+		on DataViewItemException(msgId=dvdi.msgId, dvName=dvdi.dvName) :dvie and
+		   not DataViewItemDeleted(msgId=dvdi.msgId, dvName=dvdi.dvName)
+		{
+			log "Error removing item from DataView '" + dvie.dvName +
+				"': " + dvie.message at ERROR;
+		}
+		
+		send dvdi to "";
+	}
+
+
+	action clear()
+	{
+		log "Clearing " + _tableName + " DataView." at INFO;
+		DataViewDeleteAllItems dvdai := new DataViewDeleteAllItems;
+		dvdai.msgId := integer.getUnique().toString();
+		dvdai.dvName := _tableName;
+		
+		DataViewException dve;
+		on DataViewException(msgId=dvdai.msgId, dvName=dvdai.dvName) :dve and
+		   not DataViewAllItemsDeleted(msgId=dvdai.msgId, dvName=dvdai.dvName)
+		{
+			log "Error clearing DataView '" + dve.dvName +
+				"': " + dve.message at ERROR;
+		}
+		
+		on DataViewAllItemsDeleted(msgId=dvdai.msgId, dvName=dvdai.dvName) and
+		   not DataViewException(msgId=dvdai.msgId, dvName=dvdai.dvName)
+		{
+			log "Dataview " + _tableName + " cleared." at INFO;
+		}
+		
+		send dvdai to "";
+	}
+	
+	
+	action delete()
+	{
+		log "Deleting '" + _tableName + "' DataView." at INFO;
+		DataViewDeleteDefinition dvdd := new DataViewDeleteDefinition;
+		dvdd.msgId := integer.getUnique().toString();
+		dvdd.dvName := _tableName;
+		
+		DataViewDefinitionDeleted dvddresp;
+		on DataViewDefinitionDeleted(msgId=dvdd.msgId, dvName=dvdd.dvName) :dvddresp and
+		   not DataViewException(msgId=dvdd.msgId, dvName=dvdd.dvName)
+		{
+			log "DataView '" + dvddresp.dvName +
+				"' deleted." at INFO;
+		}
+		
+		DataViewException dve;
+		on DataViewException(msgId=dvdd.msgId, dvName=dvdd.dvName) :dve and
+		   not DataViewDefinition(msgId=dvdd.msgId, dvName=dvdd.dvName)
+		{
+			log "Error deleting DataView '" + dve.dvName +
+				"': " + dve.message at ERROR;
+		}
+		
+		send dvdd to "";
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the DataViewer Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternDataView
+{
+	event StayAlive {}
+	
+	action onload()
+	{
+		string discard := DataView.DATAVIEW_CHANNEL.intern();
+		on all StayAlive() {}
+	}
+}

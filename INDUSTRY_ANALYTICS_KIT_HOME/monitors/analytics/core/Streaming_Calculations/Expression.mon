@@ -1,0 +1,692 @@
+﻿//*****************************************************************************
+// Title: Expression Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.streaming_calculations;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+using com.apama.exceptions.Exception;
+
+/** @private */
+event CompileError {
+	static action error() returns action<Data> returns decimal {
+		decimal throwException := decimal.parse("UNABLE TO PARSE");
+		return new action<Data> returns decimal;
+	}
+}
+
+/** @private */
+event Bracket {
+	string open;
+	string close;
+	action<sequence<action<Data> returns decimal>, string> returns action<Data> returns decimal compiler;
+}
+
+/** @private */
+event BracketLocation {
+	Bracket bracket;
+	integer startLocation;
+}
+
+/** @private */
+event FuncHandler {
+	action<Data> returns decimal subExpression;
+	static action create(action<Data> returns decimal subExpression, string func) returns action<Data> returns decimal {
+		FuncHandler handler := FuncHandler(subExpression);
+		dictionary<string, action<Data> returns decimal> handlers := {
+			"sin":handler.sin,
+			"cos":handler.cos,
+			"tan":handler.tan,
+			"asin":handler.asin,
+			"acos":handler.acos,
+			"atan":handler.atan,
+			"abs":handler.abs,
+			"log10":handler.log10,
+			"ln":handler.ln,
+			"exp":handler.exp,
+			"degtorad":handler.degToRad,
+			"radtodeg":handler.radToDeg,
+			"round":handler.round,
+			"ceil":handler.ceil,
+			"floor":handler.floor,
+			"rand":handler.rand
+		};
+		return handlers[func.toLower()];
+	}
+	action round(Data d) returns decimal {
+		return subExpression(d).round().toDecimal();
+	}
+	action ceil(Data d) returns decimal {
+		return subExpression(d).ceil().toDecimal();
+	}
+	action floor(Data d) returns decimal {
+		return subExpression(d).floor().toDecimal();
+	}
+	action rand(Data d) returns decimal {
+		return subExpression(d).rand();
+	}
+	action sin(Data d) returns decimal {
+		return subExpression(d).sin();
+	}
+	action cos(Data d) returns decimal {
+		return subExpression(d).cos();
+	}
+	action tan(Data d) returns decimal {
+		return subExpression(d).tan();
+	}
+	action asin(Data d) returns decimal {
+		return subExpression(d).asin();
+	}
+	action acos(Data d) returns decimal {
+		return subExpression(d).acos();
+	}
+	action atan(Data d) returns decimal {
+		return subExpression(d).atan();
+	}
+	action log10(Data d) returns decimal {
+		return subExpression(d).log10();
+	}
+	action ln(Data d) returns decimal {
+		return subExpression(d).ln();
+	}
+	action exp(Data d) returns decimal {
+		return subExpression(d).exp();
+	}
+	action abs(Data d) returns decimal {
+		return subExpression(d).abs();
+	}
+	action degToRad(Data d) returns decimal {
+		return subExpression(d)/180.0d*decimal.PI;
+	}
+	action radToDeg(Data d) returns decimal {
+		return subExpression(d)/decimal.PI*180.0d;
+	}
+}
+
+/** @private */
+event FuncCompiler {
+	action<sequence<action<Data> returns decimal>, string> returns action<Data> returns decimal expressionCompiler;
+	string func;
+	static action create(action<sequence<action<Data> returns decimal>, string> returns action<Data> returns decimal expressionCompiler, string func) returns action<sequence<action<Data> returns decimal>, string> returns action<Data> returns decimal {
+		return FuncCompiler(expressionCompiler, func).run;
+	}
+	
+	action run(sequence<action<Data> returns decimal> actions, string expression) returns action<Data> returns decimal {
+		return FuncHandler.create(expressionCompiler(actions, expression), func);
+	}
+}
+
+/** @private */
+event NegateHandler {
+	action<Data> returns decimal subExpression;
+	static action create(action<Data> returns decimal subExpression) returns action<Data> returns decimal {
+		return NegateHandler(subExpression).negate;
+	}
+	action negate(Data d) returns decimal {
+		return -subExpression(d);
+	}	
+}
+
+/** @private */
+event ValueWrapper {
+	decimal value;
+	
+	static action create(decimal value) returns action<Data> returns decimal {
+		return ValueWrapper(value).get;
+	}
+		
+	action get(Data d) returns decimal {
+		return value;
+	}
+}
+
+/** @private */
+event FieldHandler {
+	string paramName;
+	
+	static action create(string field) returns action<Data> returns decimal {
+		FieldHandler handler := new FieldHandler;
+		if field.toLower().find("param.") = 0 {
+			handler.paramName := field.substring("param.".length(), field.length());
+			field := "param";
+		} else {
+			field := field.toLower();
+		}
+		dictionary<string, action<Data> returns decimal> handlers := {
+			"dvalue": getDValue,
+			"svalue": getSValue,
+			"xvalue": getXValue,
+			"yvalue": getYValue,
+			"zvalue": getZValue,
+			"param": handler.getParam,
+			"timestamp": getTimestamp
+		};
+		if handlers.hasKey(field) {
+			return handlers[field];
+		} else {
+			log "Field " + field + " is not valid" at ERROR;
+			return CompileError.error();
+		}
+	}
+	
+	static action getDValue(Data d) returns decimal {
+		return d.dValue;
+	}
+	static action getSValue(Data d) returns decimal {
+		if decimal.canParse(d.sValue) {
+			return decimal.parse(d.sValue);
+		} else {
+			log "Expected sValue to be parseable as a decimal: " + d.toString() at ERROR;
+			return decimal.NAN;
+		}
+	}
+	static action getXValue(Data d) returns decimal {
+		return d.xValue.toDecimal();
+	}
+	static action getYValue(Data d) returns decimal {
+		return d.yValue.toDecimal();
+	}
+	static action getZValue(Data d) returns decimal {
+		return d.zValue.toDecimal();
+	}
+	action getParam(Data d) returns decimal {
+		if d.params.hasKey(paramName) {
+			if decimal.canParse(d.params[paramName]) {
+				return decimal.parse(d.params[paramName]);
+			} else {
+				log "Expected param " + paramName + " to be parseable as a decimal: " + d.toString() at ERROR;
+				return decimal.NAN;
+			}
+		} else {
+			log "Expected decimal param " + paramName + " on: " + d.toString() at ERROR;
+			return decimal.NAN;
+		}
+	}
+	static action getTimestamp(Data d) returns decimal {
+		return d.timestamp;
+	}
+}
+
+/** @private */
+event ExpressionHandler {
+	action<Data> returns decimal left;
+	action<Data> returns decimal right;
+	
+	static action create(action<Data> returns decimal left, action<Data> returns decimal right, string operator) returns action<Data> returns decimal {
+		ExpressionHandler handler := ExpressionHandler(left, right);
+		dictionary<string, action<Data> returns decimal> handlers := {
+			"^":handler.pow,
+			"/":handler.divide,
+			"*":handler.multiply,
+			"%":handler.mod,
+			"+":handler.add
+			// "-" is a special case (it is handled by the "+" handler)
+		};
+		if handlers.hasKey(operator) {
+			return handlers[operator];
+		} else {
+			log "Operator " + operator + " is not valid" at ERROR;
+			return CompileError.error();
+		}
+	}
+	action pow(Data d) returns decimal {
+		return left(d).pow(right(d));
+	}
+	action divide(Data d) returns decimal {
+		return left(d)/right(d);
+	}
+	action multiply(Data d) returns decimal {
+		return left(d)*right(d);
+	}
+	action mod(Data d) returns decimal {
+		return left(d).fmod(right(d));
+	}
+	action add(Data d) returns decimal {
+		return left(d)+right(d);
+	}
+}
+
+/* @AnalyticDefinition
+{
+	"name": "Expression",
+	"description": "Generates the result of the provided Expression using the input data events.",
+	"group": "Streaming Calculations",
+	"documentation": "com/industry/analytics/streaming_calculations/Expression.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel used to calculate the result of the Expression"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Expression",
+			"description": "The channel where the results of the Expression data is output",
+            "dataProperties": ["+dValue"]
+        }
+	],
+	"properties": [
+		{
+			"name": "expression",
+			"description": "The Expression calculation that will be applied to the incoming Data events. Eg. (${dValue}-${xValue})*5",
+			"type": "string"
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+
+/**
+ *  The Expression Analytic computation generates a Data event containing 
+ *  the results of the Expression calculation provided for each input Data received. 
+ *  As well as the basic arithmetic operators for add (+), subtraction (-), multiplication (*)
+ *  and division (/), the Expression Analytic also supports the modulus operator (%) and
+ *  power (^) operators.
+ * 
+ *  There are also functions for rounding, trigonometry and various other use cases.
+ *  
+ *  The expression provided can use values, constants, and also the parameters of the input Data event 
+ *  by using the syntax "${DVALUE}", "${SVALUE}", "${XVALUE}", "${YVALUE}", "${ZVALUE}", "${TIMESTAMP}", and "${PARAM.&lt;parameter name&gt;}".
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. All the
+ *      <font face="courier" size="-1">params</font> from the input Data are copied to the output Expression Data.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>expression</b></td><td>The Expression calculation that will be applied to the incoming <font face="courier" size="-1">Data</font> events</td>
+ *      <td>A mathematical expression as a string (e.g. "${DVALUE} * 2")</td><td>String</td><td>True</td><td></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Operators (In order of precedence):</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Operator</th><th>Description</th></tr>
+ *  <tr><td><b>|</b><small>&lt;expression&gt;</small><b>|</b></td><td>Absolute. Note: For nested use the "abs" function</td></tr>
+ *  <tr><td><b>^</b></td><td>Power (left raised to the power right)</td></tr>
+ *  <tr><td><b>/</b></td><td>Divide (left divided by right)</td></tr>
+ *  <tr><td><b>*</b></td><td>Multiply</td></tr>
+ *  <tr><td><b>%</b></td><td>Modulus (the remainder after dividing the left by the right)</td></tr>
+ *  <tr><td><b>+</b></td><td>Add</td></tr>
+ *  <tr><td><b>-</b></td><td>Subtract (left minus right)</td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Functions:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Operator</th><th>Description</th></tr>
+ *  <tr><td><b>sin(x)</b></td><td>Sin (Uses Radians)</td></tr>
+ *  <tr><td><b>cos(x)</b></td><td>Cos (Uses Radians)</td></tr>
+ *  <tr><td><b>tan(x)</b></td><td>Tan (Uses Radians)</td></tr>
+ *  <tr><td><b>asin(x)</b></td><td>Inverse Sin (Uses Radians)</td></tr>
+ *  <tr><td><b>acos(x)</b></td><td>Inverse Cos (Uses Radians)</td></tr>
+ *  <tr><td><b>atan(x)</b></td><td>Inverse Tan (Uses Radians)</td></tr>
+ *  <tr><td><b>exp(x)</b></td><td>Exponential (e to the power x)</td></tr>
+ *  <tr><td><b>ln(x)</b></td><td>Log base e</td></tr>
+ *  <tr><td><b>log10(x)</b></td><td>Log base 10</td></tr>
+ *  <tr><td><b>abs(x)</b></td><td>Absolute</td></tr>
+ *  <tr><td><b>degToRad(x)</b></td><td>Degrees to Radians</td></tr>
+ *  <tr><td><b>radToDeg(x)</b></td><td>Radians to Degrees</td></tr>
+ *  <tr><td><b>round(x)</b></td><td>Rounds to nearest whole number (uses bankers round, so 0.5 rounds to 0)</td></tr>
+ *  <tr><td><b>ceil(x)</b></td><td>Rounds upwards</td></tr>
+ *  <tr><td><b>floor(x)</b></td><td>Rounds downwards</td></tr>
+ *  <tr><td><b>rand(x)</b></td><td>Generates a random number between 0 (inclusive) and the provided number (exclusive)</td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Constants:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Constant</th><th>Math symbol</th><th>Description</th></tr>
+ *  <tr><td><b>PI</b></td><td>&pi;</td><td>Pi = 3.14159...</td></tr>
+ *  <tr><td><b>exp(1)</b></td><td>e</td><td>e = 2.71828...</td></tr>
+ *  <tr><td><b>Infinity</b></td><td>&infin;</td><td></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Expression Analytic which takes Data events on the channel "Input1"  
+// and performs a temperature conversion from Fahrenheit to Celsius based on the 
+// dValue of each Data event received. It publishes a Data event with the results 
+// of the Expression on the output channel "Output1".   
+send com.industry.analytics.Analytic("Expression", ["Input1"], ["Output1"], {"expression":"(${DVALUE}-32) * 5/9"}) to "";
+
+// Example Param usage:
+// Adds myparam1 and myparam2
+send com.industry.analytics.Analytic("Expression", ["Input1"], ["Output2"], {"expression":"${PARAM.myparam1} + ${PARAM.myparam2}"}) to "";
+
+// Example constant usage:
+// Sets the dValue of the output to PI/2 = 1.57...
+send com.industry.analytics.Analytic("Expression", ["Input1"], ["Output2"], {"expression":"PI/2"}) to "";
+
+// Example function usage:
+// Sets the dValue of the output to sin(120 degrees) = 0.866...
+send com.industry.analytics.Analytic("Expression", ["Input1"], ["Output2"], {"expression":"sin(degToRad(120))"}) to "";
+</code></dd>
+ *</dl>
+ */
+event Expression
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Expression";
+
+	/** This constant defines the configuration parameter name
+	 *  that defines the expression calculation to perform on the input Data events. */
+	constant string EXPRESSION := "expression";
+
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	
+	// State
+	/** Local cached value for the expression configuration parameter value
+	 *  @private */
+	string _expression;
+	
+	/** The action binary tree to be run for each data event
+	 * @private */
+	action<Data> returns decimal _compiledExpression;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      new action<>,
+		                      initComplete );
+	}
+		
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [EXPRESSION], [Constants.STRING], [true] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+
+			// Get the expression
+			_expression := config.getString( EXPRESSION );
+			
+			try {
+				_compiledExpression := compile(_expression);
+			} catch(Exception e) {
+				log "Unable to compile expression: " + _expression at ERROR;
+				log e.toStringWithStackTrace() at DEBUG;
+				result := false;
+			}
+		}
+		return result;
+	}
+	
+	/** @private */
+	action compile(string expression) returns action<Data> returns decimal {
+		return compileExpression(new sequence<action<Data> returns decimal>, expression);
+	}
+	
+	/** @private */
+	action compileExpression(sequence<action<Data> returns decimal> actions, string expression) returns action<Data> returns decimal {
+		
+		sequence<Bracket> bracketTypes := [
+           Bracket("${", "}", compileCurly),
+           Bracket("round(", ")", FuncCompiler.create(compileExpression, "round")),
+           Bracket("ceil(", ")", FuncCompiler.create(compileExpression, "ceil")),
+           Bracket("floor(", ")", FuncCompiler.create(compileExpression, "floor")),
+           Bracket("rand(", ")", FuncCompiler.create(compileExpression, "rand")),
+           Bracket("degToRad(", ")", FuncCompiler.create(compileExpression, "degtorad")),
+           Bracket("radToDeg(", ")", FuncCompiler.create(compileExpression, "radtodeg")),
+           Bracket("asin(",")", FuncCompiler.create(compileExpression, "asin")), 
+           Bracket("acos(",")", FuncCompiler.create(compileExpression, "acos")), 
+           Bracket("atan(",")", FuncCompiler.create(compileExpression, "atan")), 
+           Bracket("sin(",")", FuncCompiler.create(compileExpression, "sin")), 
+           Bracket("cos(",")", FuncCompiler.create(compileExpression, "cos")), 
+           Bracket("tan(",")", FuncCompiler.create(compileExpression, "tan")), 
+           Bracket("log10(",")", FuncCompiler.create(compileExpression, "log10")), 
+           Bracket("ln(",")", FuncCompiler.create(compileExpression, "ln")), 
+           Bracket("exp(",")", FuncCompiler.create(compileExpression, "exp")), 
+           Bracket("abs(", ")", FuncCompiler.create(compileExpression, "abs")),
+           Bracket("(", ")", compileExpression), 
+           Bracket("|", "|", FuncCompiler.create(compileExpression, "abs"))
+        ];
+
+
+		sequence<BracketLocation> bracketStack := new sequence<BracketLocation>;
+		integer i := 0;
+		while i < expression.length() {
+			// Search for bracket closing
+			if (bracketStack.size() > 0) {
+				BracketLocation endBracketLocation := bracketStack[bracketStack.size() - 1];
+				integer startLocation := endBracketLocation.startLocation;
+				Bracket bracket := endBracketLocation.bracket;
+				if expression.substring(i, integer.min(i+bracket.close.length(),expression.length())).toLower() = bracket.close.toLower() {
+					bracketStack.remove(bracketStack.size() - 1);
+					actions.append(bracket.compiler(actions, expression.substring(startLocation + bracket.open.length(), i)));
+					string label := "#" + (actions.size() - 1).toString() + "#";
+					string newExpression := expression.substring(0, startLocation) + label + expression.substring(i+bracket.close.length(), expression.length());
+					i := i - (expression.length() - newExpression.length()) + bracket.close.length();
+					expression := newExpression;
+					continue; // If we found a closing bracket then move on to the next character in the expression
+				}
+			}
+			// Search for bracket opening
+			Bracket bracket;
+			for bracket in bracketTypes {
+				if expression.substring(i, integer.min(i+bracket.open.length(), expression.length())).toLower() = bracket.open.toLower() {
+					bracketStack.append(BracketLocation(bracket, i));
+					i := i + bracket.open.length() - 1;
+					break;
+				}
+			}
+			i := i +1;
+		}
+		
+		BracketLocation bl;
+		for bl in bracketStack {
+			log "Unterminated bracket " + bl.bracket.open + " at position " + bl.startLocation.toString() at ERROR;
+		}
+		if bracketStack.size() > 0 {
+			return CompileError.error();
+		}
+				
+		sequence<string> operators := ["^","/","*","%","+"]; // Note "-" is a special case, it gets replaced by "+-"
+				
+		// Replace all "-" (except at the start or those preceded by another operator (or "e")) with "+-" so that we can handle negative numbers
+		expression := expression.replace("(!g)(?<!(^|[eE" + "".join(operators) + "]))-", "+-");
+		
+		// Replace all "e+" with "e" so that we don't try to do addition (for example 1.234E+23)
+		expression := expression.replaceAll("e+", "e").replaceAll("E+", "E");
+		
+		string operator;
+		for operator in operators {
+			integer i := 0;
+			integer previousToken := -1;
+			while i < expression.length() {
+				string c := expression.substring(i, i+1);
+				if c = operator {
+					string left := expression.substring(previousToken + 1, i);
+					string right := "".join(operators).tokenize(expression.substring(i+1, expression.length()))[0];
+					actions.append(compileLR(actions, left, right, operator));
+					string label := "#" + (actions.size() - 1).toString() + "#";
+					string newExpression := expression.substring(0, (previousToken + 1)) + label + expression.substring(i + right.length() + 1, expression.length());
+					i := i - expression.length() + newExpression.length() + right.length();
+					expression := newExpression;
+				} else if operators.indexOf(c) > -1 {
+					previousToken := i;
+				}
+				i := i + 1;
+			}
+		}
+		
+		return compileValue(actions, expression);
+	}
+	
+	/** @private */
+	action compileCurly(sequence<action<Data> returns decimal> actions, string field) returns action<Data> returns decimal {
+		 return FieldHandler.create(field);
+	}
+	
+	/** @private */
+	action compileLR(sequence<action<Data> returns decimal> actions, string left, string right, string operator) returns action<Data> returns decimal {
+		return ExpressionHandler.create(compileValue(actions, left), compileValue(actions, right), operator);
+	}
+	
+	/** @private */
+	action compileValue(sequence<action<Data> returns decimal> actions, string value) returns action<Data> returns decimal {
+		action<Data> returns decimal handler;
+		
+		// Handle negatives
+		boolean negate := false;
+		if value.find("-") = 0 {
+			negate := true;
+			value := value.substring(1, value.length());
+		}
+		
+		value := value.rtrim().ltrim();
+		
+		if value.matches("^#\\d*#$") {
+			handler := actions[integer.parse(value.replaceAll("#", ""))];
+		} else if value.matches("(?i)^pi$") {
+			handler := ValueWrapper.create(decimal.PI);
+		} else {
+			if decimal.canParse(value) {
+				handler := ValueWrapper.create(decimal.parse(value));
+			} else {
+				log "Could not parse " + value at ERROR;
+				return CompileError.error();
+			}
+		}
+		
+		if negate {
+			return NegateHandler.create(handler);
+		} else {
+			return handler;
+		}
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+ 	 *  @param   dataIn  The input Data event to be processed by this Analytic
+ 	 * 
+ 	 *  @private
+ 	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		decimal result;
+		try {
+			result := _compiledExpression(dataIn);
+		} catch(Exception e) {
+			log "Unable to calculate: " + _expression + " for event: " + dataIn.toString() at ERROR;
+			log e.toStringWithStackTrace() at DEBUG;
+			result := decimal.NAN;
+		}
+		
+		// Construct the output Data event
+		Data dataOut := dataIn.clone();
+		dataOut.dValue := result;
+		dataOut.streamName := _outputDataName;
+		dataOut.type       := DataConstants.COMPUTED;
+		
+		// Send the Data event
+		_analyticObject.sendData( dataOut );
+	}
+}
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Expression Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternExpression {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Expression.NAME.intern();
+		discard := Expression.EXPRESSION.intern();
+		on all StayAlive() {}
+	}
+}

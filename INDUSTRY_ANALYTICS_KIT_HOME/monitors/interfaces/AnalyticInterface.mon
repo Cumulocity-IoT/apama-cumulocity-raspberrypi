@@ -1,0 +1,147 @@
+//*****************************************************************************
+// Title:        AnalyticInterface
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+/** 
+ *  The AnalyticObject event is used to create instances of the AnalyticInterface
+ *  object that can be used to manage and implement an instance of a Analytic.
+ *
+ *  This object should not be used directly, and should be created using the 
+ *  <font face="courier" size="-1">com.industry.analytics.AnalyticObject#init()</font> action.
+ *  
+ *  @see com.industry.analytics.AnalyticObject#init() action  This action is used to create an instance of the AnalyticInterface
+ */
+event AnalyticInterface {
+   	/**
+     *  This action enables the Analytic instance to 
+	 *  listen for the set of Data events associated with the 
+	 *  set defined in the Analytics <font face="courier" size="-1">inputDataNames</font> 
+	 *  configuration parameter that was used to create the new 
+	 *  AnalyticObject.
+ 	 *
+ 	 *  <dl><dt><b>Parameters:</b></dt>
+ 	 *  <dd>flag - This Boolean flag indicates whether or not to listen to in the incoming Data events.</dd>
+	 *  </dl>
+ 	 */	
+	action<boolean> getInputFromChannel;
+   	/**
+     *  This action defines a specific action callback 
+	 *  that will be called when the Analytic generates a new  
+	 *  Data event.
+	 *
+	 *  <dl><dt><b>Parameters:</b></dt>
+	 *  <dd>outputDataName - The name of the output Data that the action callback is associated with.</dd>
+	 *  <dd>callback          - The user application defined action callback that will be called when the 
+	 *                          Analytic generates a Data event.</dd>
+	 *  </dl>
+	 */	
+	action<string, action<Data> > addOutputConnection;
+   	/**
+     *  This action enables the Analytic instance to reset 
+	 *  its state.
+	 */	
+	action<> reset;
+   	/**
+     *  This action enables the Analytic instance to start 
+	 *  listening to, and processing incoming Data events.
+	 */	
+	action<> start;
+   	/**
+     *  This action stops the Analytic instance from listening to,
+	 *  and processing any further incoming Data events.
+	 */	
+	action<> stop;
+   	/**
+     *  This action calls the user-defined action callback 
+	 *  that was provided when creating the AnalyticObject instance.
+	 *  This action processes the provided Data event that was 
+	 *  received, and performs any calculation/manipulation that is
+	 *  required.
+	 *
+	 *  <dl><dt><b>Parameters:</b></dt>
+	 *  <dd>Data - The Data event that was received by the Analytic.</dd>
+	 *  </dl>
+	 *  @private
+	 */	
+	action<Data> _processData;
+   	/**
+     *  This action calls the user-defined action callback 
+	 *  that was provided when creating the AnalyticObject instance.
+	 *  This action processes the provided Data events that were 
+	 *  received and treated as a coherent set, and performs any 
+	 *  calculation/manipulation that is required.
+	 *
+	 *  <dl><dt><b>Parameters:</b></dt>
+	 *  <dd>Data - The Data event that was received by the Analytic.</dd>
+	 *  </dl>
+	 *  @private
+	 */	
+	action<dictionary<string, Data> > _processDataStream;
+    /**
+     *  This action sends the specified Data event to the output.
+	 *  The method of sending the Data depends on the Analytics
+	 *  configuration, and whether one or more action callbacks have 
+	 *  been added.
+	 *
+	 *  <dl><dt><b>Parameters:</b></dt>
+	 *  <dd>Data - The Data event that it to be sent by the Analytic.</dd>
+	 *  </dl>
+	 */	
+	action<Data> sendData;
+	
+	
+  	/**
+     *  This action calls the optional user-defined action callback 
+	 *  that was provided when creating the AnalyticObject instance.
+	 *  This action processes the provided Data event that was 
+	 *  received, and performs any calculation/manipulation that is
+	 *  required.
+	 *
+	 *  <dl><dt><b>Parameters:</b></dt>
+	 *  <dd>data - The Data event that was received by the Analytic.</dd>
+	 *  </dl>
+	 */	
+	action processData(Data data)
+	{
+		ifpresent _processData
+		{
+			_processData(data);
+		}
+	}
+	
+	
+   	/**
+     *  This action calls the optional user-defined action callback 
+	 *  that was provided when creating the AnalyticObject instance.
+	 *  This action processes the provided Data events that were 
+	 *  received and treated as a coherent set, and performs any 
+	 *  calculation/manipulation that is required.
+	 *
+	 *  <dl><dt><b>Parameters:</b></dt>
+	 *  <dd>datastream - The Data event that was received by the Analytic.</dd>
+	 *  </dl>
+	 */	
+	action processDataStream(dictionary<string, Data> datastream)
+	{
+		ifpresent _processDataStream
+		{
+			_processDataStream(datastream);
+		}
+	}
+}

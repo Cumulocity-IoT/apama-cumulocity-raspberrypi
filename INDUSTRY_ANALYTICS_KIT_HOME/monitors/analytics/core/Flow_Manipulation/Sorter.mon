@@ -1,0 +1,434 @@
+//*****************************************************************************
+// Title: Sorter Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "Sorter",
+	"description": "Sort incoming events by their timestamp.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Sorter.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to sort",
+			"repeated": true
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Sorted",
+			"description": "Sorted data channel",
+			"repeated": true
+		}
+	],
+	"properties": [
+		{
+			"name": "timeWindow",
+			"description": "How long to delay events, allowing them to be sorted.",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Must be greater than 0' }",
+			"postfix": "(Seconds)"
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ * In a general use case the event ordering cannot be guaranteed. This may be 
+ *  because the events are batched in some way for different devices or network 
+ *  delays. For example, where vehicles take data readings every 5 minutes but 
+ *  only return the results as a batch every hour.
+ * 
+ *  The Sorter Analytic will receive multiple Data events of
+ *  different names and store them into a single ordered sequence sorted 
+ *  by the originating timestamp. It will then dispatch the oldest stored 
+ *  values after a minimum (held) time period. The result is a single combined
+ *  stream of Data events that will be delayed by a minimum period.  This
+ *  delay will allow for late or out-of-order events to be correctly ordered. 
+ *
+ *  Multiple input channels can also be specified where the Data events that are
+ *  received are sorted across all input channels before they are sent in time-order
+ *  to their corresponding output channel.  Note that the set of input channels must be 
+ *  in the same order as the output channels.
+ *
+ *  We cannot use the internal Correlator timers as incoming data will be 
+ *  heavily clustered, so we need to use the event timestamp values:
+ *  <ol>
+ *  <li>Receive a new Data; insert into sequence ordered by timestamp value within the event.</li>
+ *  <li>Time period between the newly received timestamp value and the oldest timestamp in the 
+ *      sequence compared; if that event has been stored for more than the minimum period then
+ *      dispatch it and remove from the sequence; then look at the next oldest and repeat until
+ *      no events have been held for the minimum period.</li>
+ *  <li>We may not get a new event before we need to dispatch the next output event and 
+ *      we can't rely on correlator time; so we:</li>
+ *  <ol type="a"><li>Calculate a timeout period as 10% of the minimum hold period (e.g. t_out := min * 0.1;).</li>
+ *      <li>Set an on wait timer for this calculated period.</li>
+ *      <li>If we get a new incoming Data event before the timer triggers the timer is 
+ *          torn down and re-added in the cycle of the new event.</li>
+ *      <li>If the timer triggers then our new time is the timestamp of the last received event 
+ *          plus the calculated timeout period (e.g. newtime := sequence[0].timestamp + t_out).</li>
+ *      <li>We then use this to try to flush the sequence. We then create a new timeout and go to step 3 and repeat.</li>
+ *  </ol></ol>
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>At least one or more input Data channel must be provided</dd>
+ *  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>The same number of output Data channels must be provided as are defined in the input Data channel list.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>timeWindow</b></td><td>Defines the time window in which to sort Data events</td>
+ *      <td>Stringified decimal <font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>True</td><td></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Sorter Analytic which takes Data events on the channel "Input1"  
+// and stores the values in a 10.0 second time window before republishing them 
+// ordered by the events timestamp parameter.
+send com.industry.analytics.Analytic("Sorter", ["Input1"], ["Output1"], {"timeWindow":"10.0"} ) to "";
+</code></dd>
+ *</dl>
+ */ 
+event Sorter
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Sorter";
+	
+	/** This constant defines the configuration parameter name that
+	 *  specifies the time window (in seconds) that the events will be 
+	 *  sorted within */
+	constant string TIMEWINDOW := "timeWindow";
+	
+	// State
+	/** Local cache of the set of data received, keyed by the 
+	 *  the timestamp they were received.
+	 *  @private */
+	dictionary<decimal, sequence<Data> > _datastream;
+	
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	dictionary<string,string> _outputDataNameMap;
+	
+	/** Local cached value for the timeWindow configuration parameter value
+	 *  @private */
+	decimal _timeWindow;
+	/**  @private */
+	decimal _waitWindow;
+	/**  @private */
+	listener _waitListener;
+	/**  @private */
+	decimal _expiredTimestamp;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_waitWindow := _timeWindow / 10.0d;
+		_expiredTimestamp := -1.0d;
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, -1, -1, 
+		                                         [TIMEWINDOW], [Constants.DECIMAL], [true] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			if( config.inputDataNames.size() != config.outputDataNames.size() ) then {
+				log "inputDataNames and outputDataNames sequences must contain the same number of values." at ERROR;
+				result := false;
+			}
+		}
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Check that we have at least one input channel
+			if( config.inputDataNames.size() < 1 ) then	{
+				log "inputDataNames sequence should contain at least one entry." at ERROR;
+				log "  inputDataNames: " + config.inputDataNames.toString() at ERROR;
+				result := false;
+			} else {			
+				string currInputName;
+				for currInputName in config.inputDataNames {
+					string trimmedName := currInputName.ltrim().rtrim();
+					if( trimmedName.length() = 0 ) then {
+						log "inputDataNames cannot contain blank strings." at ERROR;
+						result := false;
+					}
+				}
+			}
+		}
+		
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Check that we have at least one input channel
+			if( config.outputDataNames.size() < 1 ) then	{
+				log "outputDataNames sequence should contain at least one entry." at ERROR;
+				log "  outputDataNames: " + config.outputDataNames.toString() at ERROR;
+				result := false;
+			} else {			
+				integer index := 0;
+				string currOutputName;
+				for currOutputName in config.outputDataNames {
+					string trimmedName := currOutputName.ltrim().rtrim();
+					if( trimmedName.length() = 0 ) then {
+						log "outputDataNames cannot contain blank strings." at ERROR;
+						result := false;
+					}
+					
+					// Cache the input/output channel names
+					_outputDataNameMap.add( config.inputDataNames[ index ], currOutputName );
+					
+					// Increment the index to be used for the input channels
+					index := index+1;
+				}
+			}
+		}
+		
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			_timeWindow := config.getDecimal(TIMEWINDOW);
+			if( _timeWindow <= 0.0d ) then {
+				log "  Param timeWindow must be positive. Given value: " + _timeWindow.toString() at ERROR;
+				result := false;
+			}
+		} 
+		
+		return result;
+	}
+	
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 * 
+	 *  The following operations are implemented: 
+	 *  1) Ensure the Data is valid, ie; within the current time window.
+	 *  2) Add it to the dictionary of Data events being sorted.
+	 *  3) Check the dictionary for Data events that should be sent on.
+	 *  4) Create a listener for the next check on 3) should a new Data not arrive.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn )	{
+		log "Processing " + dataIn.toString() at DEBUG;
+		sequence<Data> dataSequence := _datastream.getOrDefault( dataIn.timestamp );
+		if( _validateData( dataIn ) ) then {
+			dataSequence.append( dataIn );
+			_datastream[ dataIn.timestamp ] := dataSequence;
+
+			_expiredTimestamp := decimal.max(_expiredTimestamp, dataIn.timestamp - _timeWindow);
+			_checkForTimedOutDatas();
+			_createWaitListener();
+		}
+	}
+
+	/**
+	 *  Ensure the Data is within the allotted time window,
+	 *  else send it on as an Anomaly.
+	 *  This action is called internally and should not be called
+	 *  directly by the Users application.
+   	 *
+   	 *  @private
+   	 */	
+	action _validateData( Data dataIn ) returns boolean {
+		// Check if the current Data timestamp is earlier than the expiry timestamp
+		if( dataIn.timestamp <= _expiredTimestamp ) then {
+			Data dataOut := dataIn.clone();
+			dataOut.streamName := _outputDataNameMap.getOrAddDefault( dataIn.streamName );
+			dataOut.type       := DataConstants.ANOMALY;
+			dataOut.params[Constants.ANOMALY_SOURCE] := NAME;
+			_analyticObject.sendData(dataOut);
+			return false;
+		}
+		return true;
+	}
+
+
+	/**
+	 *  Creates wait listener for ensuring that already received Data events are sent on
+	 *  even if no new Data events are received from the source.
+	 *  This action is called internally and should not be called
+	 *  directly by the Users application.
+	 *
+	 *  @private
+	 */	
+	action _createWaitListener() {
+		_waitListener.quit();
+		_waitListener := on wait( _waitWindow.toFloat() ) {
+			_expiredTimestamp := _expiredTimestamp + _waitWindow;
+			_checkForTimedOutDatas();
+			_createWaitListener();
+		}
+	}
+
+
+	/**
+	 *  Check through the dictionary for entries which have now exceeded the specified
+	 *  time window. Send on those that have.
+   	 *  This action is called internally and should not be called
+   	 *  directly by the Users application.
+  	 *
+  	 *  @private
+  	 */	
+	action _checkForTimedOutDatas()	{
+		log "_expiredTimestamp: " + _expiredTimestamp.toString() at DEBUG;
+		sequence<decimal> timestamps := _datastream.keys();
+		integer index := 0;
+		while index < timestamps.size() and timestamps[index] <= _expiredTimestamp
+		{
+			_sendDatas( timestamps[index] );
+ 			index := index + 1;
+		}
+	}
+	
+
+	/**
+	 *  1) Adjust and send on the Data events from the given timestamp in the dictionary.
+	 *  2) Remove the sent entries from the dictionary.
+  	 *  This action is called internally and should not be called
+  	 *  directly by the Users application.
+ 	 *
+ 	 *  @private
+ 	 */	
+	action _sendDatas( decimal timestamp ) {
+		sequence<Data> dataVals := _datastream.getOrDefault(timestamp);
+		Data currData;
+		for currData in dataVals {
+			Data dOut := currData.clone();
+			dOut.streamName := _outputDataNameMap.getOrAddDefault( currData.streamName );
+			if( dOut.type = DataConstants.RAW ) then {
+				dOut.type := DataConstants.COMPUTED;
+			}
+			_analyticObject.sendData(dOut);
+		}
+		// We should never have the state when as empty sequence exists in the dictionary,
+		// so a zero size should always be the edge case of a default return above.
+		if( dataVals.size() > 0 ) then {
+			_datastream.remove( timestamp );
+		}
+	}
+
+
+	/**
+	 *  Optional action to reset the state of the analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+ 	 *  @private
+  	 */
+	action reset() {
+		_datastream.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Sorter Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternSorter {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := Sorter.NAME.intern();
+		discard := Sorter.TIMEWINDOW.intern();
+		on all StayAlive() {}
+	}
+}

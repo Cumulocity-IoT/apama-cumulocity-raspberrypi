@@ -1,0 +1,4 @@
+// Name: Spike
+// Version: 2.0.0.0
+// Row: 0
+com.industry.analytics.Analytic("Spike",["TemperatureData"],["Spikes","avg:Moving Average","upper:Upper","lower:Lower"],{"verbose":"false","timeWindow":"60.0d"})

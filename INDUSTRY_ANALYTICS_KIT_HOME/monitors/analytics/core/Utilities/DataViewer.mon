@@ -1,0 +1,393 @@
+//*****************************************************************************
+// Title: DataViewer Analytic implementation
+//
+// Copyright (c) 2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.utilities;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+using com.industry.analytics.DataView;
+
+using com.apama.dataview.DataViewAddOrUpdateItem;
+
+
+/* @AnalyticDefinition
+{
+	"name": "DataViewer",
+	"description": "Enables data to be displayed in an Apama dataview window.",
+	"group": "Utilities",
+	"documentation": "com/industry/analytics/utilities/DataViewer.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel which receives data to be displayed in a dataview"
+		}
+	],
+	"properties": [
+		{
+			"name": "name",
+			"description": "This parameter defines the name of the DataView where the incoming Data event data will be stored",
+			"type": "string",
+			"optional": true,
+			"defaultValue": "Input channel name",
+			"validator": "function(value) { return value.length > 0 || 'Name must not be blank' }"
+		},{
+			"name": "owner",
+			"description": "The parameter defines the ownerId of the DataView ownerId that is created",
+			"type": "string",
+			"optional": true,
+			"defaultValue": "'*' = Any owner",
+            "validator": "function(value) { return value.length > 0 || 'Owner must not be blank' }",
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+    ]
+}
+*/
+
+/**
+ *  The DataViewer Analytic caches the data from the defined 
+ *  input Data channel to a table in DataViewer named by the provided <font face="courier" size="-1">outputDataName</font>. 
+ *  It also adds an entry in the DataViewer table for that table name. The
+ *  Data table is keyed on name and sourceId. This method was chosen over
+ *  putting all the output into a single Data table due to a limitation 
+ *  of using trend tables within Apama Dashboards that only allows one trend
+ *  table to be created and maintained from any given table.  This causes a 
+ *  problem when trying to display filtered output from a single table.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>None</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>name</b></td><td>The name of the DataView table where the incoming Data event data will be stored</td>
+ *      <td>A non-empty string</td><td>String</td><td>False</td><td>The input Data name</td></tr>
+ *  <tr><td><b>owner</b></td><td>The identifier used as the owner of the DataView table that will be created. Defaults to access for all users</td>
+ *      <td>A non-empty string</td><td>String</td><td>False</td><td><font face="courier" size="-1">*</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+// Define a DataViewer Analytic which will create a dataview called "Input1" 
+// and publish Data events from the channel "Input1" to it.
+send com.industry.analytics.Analytic("DataViewer", ["Input1"], new sequence&ltstring&gt, new dictionary&ltstring,string&gt ) to "";
+
+// Define a DataViewer Analytic which will create a dataview called "MyDataView" 
+// and store Data events from the channel "Input2" into it.
+send com.industry.analytics.Analytic("DataViewer", ["Input2"], new sequence&ltstring&gt, {"name":"MyDataView"} ) to "";
+</code></dd>
+ *  </dl>
+ */
+event DataViewer
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "DataViewer";
+	
+	/** This constant defines the configuration parameter name that
+	 *  specifies the name of the DataView to create */
+	constant string DATAVIEW_NAME := "name";
+	
+	/** This constant defines the configuration parameter name that
+	 *  specifies the ownerId of the DataView to create */
+	constant string DATAVIEW_OWNERID := "owner";
+	
+	// Algo specific variables
+	/** Local cached output DataView name
+	 *  @private */
+	string _dataViewName;
+	/** Local cached output DataView name
+	 *  @private */
+	string _dataViewOwner;
+
+	/** Local cached copy of the completion callback. This is required
+	 *  as we need to wait for the tables to be created before calling 
+	 *  back the application. 
+	 *  @private */	
+	action<boolean, AnalyticInterface> _initComplete;
+	/** DataView helper object for the dataview Data events table.
+	 *  @private */
+	DataView _dvDatas;
+	/** DataView helper object for the dataview names table.
+	 *  @private */
+	DataView _dvDv;
+	/** Boolean indicating whether or not the Data Cache is ready
+	 *  @private */
+	boolean _isDataDvReady;
+	/** Boolean indicating whether or not the MemoryStores Cache is ready
+	 *  @private */
+	boolean _isDvDvReady;
+
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	/** The cached Analytic Interface object 
+	 *  @private */
+	AnalyticInterface _AnalyticInterface;
+	
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+
+		_initComplete := initComplete;
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.initExtended( config,
+		                              processData,
+		                              new action<dictionary<string, Data> >,
+				                      false,
+				                      reset,
+		                              _onDelete,
+		                              _setupDataView );
+	}
+	
+	/** 
+	 *  @private 
+	 */
+	action _setupDataView(boolean success, AnalyticInterface ci)
+	{
+		if not success then {_initComplete(success, ci);}
+		_AnalyticInterface := ci;
+		_dvDatas.init( _dataViewName,
+		               Data.getFieldNames(),
+		               Data.getFieldTypes(),
+		               Data.getKeyFields(),
+		               false,
+		               _dvDatasReady);
+		_dvDv.init(NAME,
+		           ["name", "dvName"],
+		           [Constants.STRING, Constants.STRING],
+		           ["name"],
+		           true,
+	               _dvDvReady);
+	}
+	
+	
+	/** 
+	 *  @private 
+	 */
+	action _dvDatasReady(boolean flag)
+	{
+		_isDataDvReady := flag;
+		if _isDataDvReady then
+		{
+			if _isDvDvReady then {_dvsReady();}
+		}
+		else
+		{
+			log "Data DataView setup failed." at ERROR;
+			_initComplete(false, new AnalyticInterface);
+		}
+	}
+	
+	
+	/** 
+	 *  @private 
+	 */
+	action _dvDvReady(boolean flag)
+	{
+		_isDvDvReady := flag;
+		if _isDvDvReady then
+		{
+			if _isDataDvReady then {_dvsReady();}
+		}
+		else
+		{
+			log "Dataview names DataView setup failed." at ERROR;
+			_initComplete(false, new AnalyticInterface);
+		}
+	}
+	
+	
+	/** 
+	 *  @private 
+	 */
+	action _dvsReady()
+	{
+		log _dataViewName + " dataviews ready for instance of Analytic " + NAME at DEBUG;
+		
+		DataViewAddOrUpdateItem item := new DataViewAddOrUpdateItem;
+		item.dvName := NAME;
+		item.owner := _dataViewOwner;
+		item.fieldValues := [_dataViewName, "DV_"+_dataViewName];
+		_dvDv.add(item);
+		
+		_initComplete(true, _AnalyticInterface);
+	}
+	
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 0, 
+		                                         [ DATAVIEW_NAME,    DATAVIEW_OWNERID ],
+		                                         [ Constants.STRING, Constants.STRING ],
+		       		                           	 [ false,            false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Default to using the name of the input data channel 
+			// as the name of the DataView
+			_dataViewName := config.getOrString( DATAVIEW_NAME, config.inputDataNames[0] ).ltrim().rtrim();
+			if( _dataViewName.length() = 0 ) then {
+				log "Dataview name parameter cannot contain blank strings." at ERROR;
+				result := false;
+			}
+			// Get the ownerId and default to "all users" with a wildcard
+			_dataViewOwner := config.getOrString( DATAVIEW_OWNERID, "*" ).ltrim().rtrim();
+			if( _dataViewOwner.length() = 0 ) then {
+				log "Dataview ownerId parameter cannot contain blank strings." at ERROR;
+				result := false;
+			}
+		}
+		
+		return result;
+	}
+	
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData(Data dataIn)
+	{
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		com.apama.dataview.DataViewAddOrUpdateItem item := new com.apama.dataview.DataViewAddOrUpdateItem;
+		item.dvName      := dataIn.streamName;
+		item.owner       := _dataViewOwner;
+		item.timeStamp   := dataIn.timestamp.toFloat();
+		item.fieldValues := [dataIn.streamName,
+		                     dataIn.type,
+		                     dataIn.sourceId,
+		                     dataIn.timestamp.toString(),
+		                     dataIn.dValue.toString(),
+		                     dataIn.sValue,
+		                     dataIn.xValue.toString(),
+		                     dataIn.yValue.toString(),
+		                     dataIn.zValue.toString(),
+		                     dataIn.params.toString()];
+		
+		// Add the item to the dataview
+		_dvDatas.add( item );
+	}
+
+	/**
+	 *  Optional action to reset the state of the analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @private
+	 */
+	action reset() {
+		_dvDatas.clear();
+	}
+	
+
+	/**
+	 *  Action to clear up when a DataViewer instance is deleted. The entry
+	 *  in the DataViewer list table is deleted and the Data events table for this
+	 *  instance is deleted.
+	 *
+	 *  @private
+	 */
+	action _onDelete() {
+		_dvDv.remove(-1, [ _dataViewName ]);
+		_dvDatas.delete();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the DataViewer Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternDataViewer {
+	event StayAlive {}
+	
+	action onload() {
+		string discard := DataViewer.NAME.intern();
+		on all StayAlive() {}
+	}
+}

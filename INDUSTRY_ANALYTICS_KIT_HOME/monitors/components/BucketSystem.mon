@@ -1,0 +1,359 @@
+package com.industry.utils;
+
+using com.apama.exceptions.Exception;
+
+/** A Bucket of data */
+event Bucket {
+	/** The start value of the bucket (Usually the start time) - Inclusive */
+	float start;
+	/** The current size of the bucket (if the bucket is the latest then this equals: "the latest value in the bucket" - "the start value of the bucket", otherwise this is the maxSize) */
+	float currentSize;
+	/** The maximum size of the bucket */
+	float maxSize;
+	/** The data stored in the bucket */
+	any data;
+	
+	/** Does the value fit into this bucket */
+	action containsValue(float value) returns boolean {
+		return not isValueSmaller(value) and not isValueLarger(value);
+	}
+	/** Is the value larger than this bucket */
+	action isValueLarger(float value) returns boolean {
+		return value >= start + maxSize;
+	}
+	/** Is the value smaller than this bucket */
+	action isValueSmaller(float value) returns boolean {
+		return value < start;
+	}
+	
+	/** The end of the bucket once it has been filled */
+	action finalEnd() returns float {
+		return start + maxSize;
+	}
+	
+	/** The current end of the bucket - Given the provided data (will grow until it equals finalEnd, at which point a new bucket will be created) */
+	action currentEnd() returns float {
+		return start + currentSize;
+	}
+}
+
+/** BucketSystem provides a way to group anything into buckets
+ * 	They are grouped by a float value (Usually a timestamp), either provided with the incoming data or through an earlier provided getter
+ *  A required updateBucket callback allows data to be stored into a bucket in any chosen format, either aggregating the data or storing all data.
+ *  Example Usage:
+ * <code>
+// Create a bucketSystem made up of 6 buckets each 10 seconds long
+BucketSystem bucketSystem := BucketSystemBuilder.create()
+												.toValue(getTimestampFromData)
+												.updateBucket(addDataToBucket)
+												.bucketSize(10.0)
+												.bucketCount(6)
+												.onBucketCreate(initializeBucket)
+												.build();
+
+action getTimestampFromData(any data) returns float {
+	return (&lt;Data&gt; data).getTimestamp();
+}
+
+action addDataToBucket(Bucket b, any data) returns any {
+	sequence&lt;Data&gt; result := (sequence&lt;Data&gt;b.data)
+	result.append(&lt;Data&gt; data);
+	return result;
+}
+
+action initializeBucket(Bucket b) {
+	b.data := new sequence&lt;Data&gt;;
+}
+
+bucketSystem.add(data); // Adding data where the timestamp is extracted from the data
+bucketSystem.addWithValue(data, 1234.0); // Adding data where the timestamp is provided with the data
+
+bucketSystem.reduce(combineBuckets, new sequence&lt;Data&gt;); // Concatenate all of the sequences stored inside all of the buckets to produce a sequence of all data
+
+action combineBuckets(any allData, Bucket b) return any {
+	allData.appendSequence(&lt;sequence&lt;Data&gt;&gt; b.data);
+	return allData;
+}
+
+</code>
+ */
+event BucketSystem {
+	/** @private In order from oldest to newest */ sequence<Bucket> buckets;
+	/** @private */ float bucketSize;
+	/** @private */ float totalSize;
+	/** @private */ integer bucketCount;
+	
+	/** Whether the bucketSystem can remove all buckets and restart when the gap between data is larger than the totalSize of the bucketSystem
+	 * If false then the bucketSystem will add any intermediate buckets (This could potentially take a long time if the gap is large) */
+	boolean skipForwardOnGap;
+	
+	/** @private The function to be called to determine which bucket to place a value (Usually a getter for a timestamp) */
+	action<any> returns float toValue;
+	/** @private The function to be called when a bucket is updated (via the add action)*/
+	action<Bucket, any>  returns any updateBucket;
+	
+	/** Optional - Called when a bucket is removed */
+	action<Bucket> onBucketExpired;
+	/** Optional - Called when a bucket is created */
+	action<Bucket> onBucketCreated;
+	
+	/** Add an item to the bucketSystem */
+	action addWithValue(any item, float itemValue) {
+		Bucket b;
+		if buckets.size() = 0 {
+			b := Bucket(itemValue, 0.0, bucketSize, new any);
+			addBucket(b);
+		} else if not buckets[0].isValueSmaller(itemValue) {
+			// If there has been a large gap between the items then skip forward, 
+			// otherwise find the appropriate bucket (adding new ones as necessary)
+			if skipForwardOnGap and itemValue >= buckets[buckets.size() - 1].finalEnd() + totalSize {
+				expireAllBuckets();
+				// Create the empty buckets that would have existed if there hadn't been a gap
+				integer i := bucketCount - 1;
+				while i > 0 {
+					// Add a completed bucket (Where the currentSize = the maxSize)
+					addBucket(Bucket(itemValue - i.toFloat() * bucketSize, bucketSize, bucketSize, new any));
+					i := i - 1;
+				}
+				// Add an incomplete bucket (Where the currentSize = 0)
+				b := Bucket(itemValue, 0.0, bucketSize, new any);
+				addBucket(b);
+			} else {
+				integer i := 0;
+				b := buckets[0];
+				while not b.containsValue(itemValue) {
+					i := i + 1;
+					if i > buckets.size() - 1 {
+						Bucket lastBucket := buckets[buckets.size() - 1];
+						lastBucket.currentSize := lastBucket.maxSize;
+						addBucket(Bucket(b.finalEnd(), 0.0, bucketSize, new any));
+						if buckets.size() > bucketCount {
+							expireFirstBucket();
+							i := i - 1;
+						}
+					}
+					b := buckets[i];
+				}
+			}
+		} else {
+			// Handle value outside window
+			log "BucketSystem: Received value that can't be added to any bucket" at INFO;
+			return;
+		}
+		
+		b.currentSize := itemValue - b.start;
+		b.data := updateBucket(b.clone(), item);
+	}
+	
+	/** Add an item to the bucketSystem
+	 * Throws an exception if toValue function has not been provided
+	 * See also: BucketSystem.addWithValue
+	 */
+	action add(any item) {
+		ifpresent toValue {
+			addWithValue(item, toValue(item));
+		} else {
+			throw Exception("Must provide a toValue function, alternatively call addWithValue", "NotSupportedException");
+		}
+	}
+	
+	/** @private */
+	action addBucket(Bucket b) {
+		buckets.append(b);
+		ifpresent onBucketCreated {
+			onBucketCreated(b);
+		}
+	}
+	
+	/** @private */
+	action expireAllBuckets() {
+		sequence<Bucket> expired := buckets.clone();
+		buckets.clear();
+		ifpresent onBucketExpired {
+			Bucket b;
+			for b in buckets {
+				onBucketExpired(b);
+			}
+		}
+	}
+	
+	/** @private */
+	action expireFirstBucket() {
+		Bucket expired := buckets[0];
+		buckets.remove(0);
+		ifpresent onBucketExpired {
+			onBucketExpired(expired);	
+		}
+	}
+	
+	/** Get all buckets */
+	action getBuckets() returns sequence<Bucket> {
+		return buckets;
+	}
+	
+	/** Create a bucket system 
+	 * @param updateBucket The function called to determine how to store a particular value into a bucket
+	 * @param toValue The function called to determine which bucket to place a value into (For example: a function that gets the timestamp from a object passed to "BucketSystem.add")
+	 * @param bucketSize The size of an individualBucket
+	 * @param bucketCount The maximum number of buckets to use
+	 * 
+	 * @returns A new BucketSystem 
+	 *
+	 * @see com.industry.utils.BucketSystemBuilder provides a better interface for construction and param validation
+	 */
+	static action create(action<Bucket, any>  returns any updateBucket, action<any> returns float toValue, float bucketSize, integer bucketCount) returns BucketSystem {
+		BucketSystem b := new BucketSystem;
+		b.toValue := toValue;
+		b.updateBucket := updateBucket;
+		b.bucketCount := bucketCount;
+		b.bucketSize := bucketSize;
+		b.totalSize := bucketSize * bucketCount.toFloat();
+		b.skipForwardOnGap := true;
+		return b;
+	}
+	
+	/** Reduce buckets to a single value or event 
+	 *  Example:
+	 * <code>
+		// Sum all of the buckets
+        float sum := &lt;float&gt;bucketSystem.reduce(sum, 0);
+	
+		action sum(any accumulator, Bucket b) returns any {
+			return &lt;float&gt; accumulator + &lt;float&gt;b.value;
+		}
+	 </code> 
+	 */
+	action reduce(action<any, Bucket> returns any callback, any initialValue) returns any {
+		Bucket b;
+		for b in buckets {
+			initialValue := callback(initialValue, b);
+		}
+		return initialValue;
+	}
+}
+
+/** A Builder through which to construct a BucketSystem
+* Eg.
+* <code>
+BucketSystem bucketSystem := BucketSystemBuilder.create()
+												.toValue(getTimestampFromData)
+												.updateBucket(addDataToBucket)
+												.totalSize(10.0)
+												.bucketCount(4)
+												.build();
+</code>
+*/
+event BucketSystemBuilder {
+	optional<float> _bucketSize;
+	optional<float> _totalSize;
+	optional<integer> _bucketCount;
+	optional<boolean> _skipForwardOnGap;
+	
+	action<any> returns float _toValue;
+	action<Bucket, any>  returns any _updateBucket;
+
+	action<Bucket> _onBucketExpired;
+	action<Bucket> _onBucketCreated;
+	
+	static action create() returns BucketSystemBuilder {
+		return new BucketSystemBuilder;
+	}
+	
+	action toValue(action<any> returns float toValue) returns BucketSystemBuilder {
+		_toValue := toValue;
+		return self;
+	}
+	
+	action updateBucket(action<Bucket, any>  returns any updateBucket) returns BucketSystemBuilder {
+		_updateBucket := updateBucket;
+		return self;
+	}
+	
+	action bucketSize(float bucketSize) returns BucketSystemBuilder {
+		_bucketSize := bucketSize;
+		ifpresent _totalSize {
+			_bucketCount := (_totalSize / bucketSize).round();
+		} else {
+			ifpresent _bucketCount {
+				_totalSize := bucketSize * _bucketCount.toFloat();
+			}
+		}
+		return self;
+	}
+	
+	action bucketCount(integer bucketCount) returns BucketSystemBuilder {
+		_bucketCount := bucketCount;
+		ifpresent _totalSize {
+			_bucketSize := _totalSize / bucketCount.toFloat();
+		} else {
+			ifpresent _bucketSize {
+				_totalSize := bucketCount.toFloat() * _bucketSize;
+			}
+		}
+		return self;
+	}
+	
+	action totalSize(float totalSize) returns BucketSystemBuilder {
+		_totalSize := totalSize;
+		ifpresent _bucketCount {
+			_bucketSize := totalSize / _bucketCount.toFloat();
+		} else {
+			ifpresent _bucketSize {
+				_bucketCount := (totalSize / _bucketSize).round();
+			}
+		}
+		return self;
+	}
+	
+	action skipForwardOnGap(boolean skipForwardOnGap) returns BucketSystemBuilder {
+		_skipForwardOnGap := skipForwardOnGap;
+		return self;
+	}
+
+	action onBucketExpired(action<Bucket> onBucketExpired) returns BucketSystemBuilder {
+		_onBucketExpired := onBucketExpired;
+		return self;
+	}
+	
+	action onBucketCreated(action<Bucket> onBucketCreated) returns BucketSystemBuilder {
+		_onBucketCreated := onBucketCreated;
+		return self;
+	}
+	
+	/** Create a BucketSystem from the pre-provided params 
+	 * Throws an Exception if any required params have not been set.
+	 * Must provide 2 of [bucketSize, totalSize, bucketCount].
+   	 * BucketCount should be larger than 0
+   	 * BucketSize should be larger than 0
+   	 * TotalSize should be larger than 0
+	 * Must provide an updateBucket function.
+	 * Must provide a toValue function
+	 */ 
+	action build() returns BucketSystem {
+		if _bucketSize.empty() or _totalSize.empty() or _bucketCount.empty() {
+			throw Exception("Must provide 2 of [bucketSize, totalSize, bucketCount]", "IllegalArgumentException");
+		}
+		
+		if _bucketCount.getOrThrow() <= 0 {
+			throw Exception("BucketCount should be larger than 0", "IllegalArgumentException");
+		}
+		
+		if _bucketSize.getOrThrow() <= 0.0 {
+			throw Exception("BucketSize should be larger than 0", "IllegalArgumentException");
+		}
+
+		if _totalSize.getOrThrow() <= 0.0 {
+			throw Exception("TotalSize should be larger than 0", "IllegalArgumentException");
+		}
+		
+		ifpresent _updateBucket {} else {
+			throw Exception("Must provide an updateBucket function", "IllegalArgumentException");
+		}
+		
+		BucketSystem bs := BucketSystem.create(_updateBucket, _toValue, _bucketSize.getOrThrow(), _bucketCount.getOrThrow());
+		bs.onBucketExpired := _onBucketExpired;
+		bs.onBucketCreated := _onBucketCreated;
+		bs.skipForwardOnGap := _skipForwardOnGap.getOr(true);
+		return bs;
+	}
+}

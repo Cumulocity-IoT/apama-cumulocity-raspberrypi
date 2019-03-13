@@ -1,0 +1,216 @@
+//*****************************************************************************
+// Title: Duplicator Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "Duplicator",
+	"description": "Duplicate an input stream to multiple output streams.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Duplicator.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to duplicate"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Duplicated",
+			"description": "A duplicated data channel",
+			"repeated": true
+		}
+	],
+	"properties": [
+		{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Duplicator Analytic takes one input channel, and then
+ *  duplicates the unmodified event received onto one or more output channels. 
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>One or more output Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a Duplicator Analytic which takes Data events on the channel "Input1" 
+// and publishes a copy of the Data event onto two output channels ("Output1" and "Output2")
+send com.industry.analytics.Analytic("Duplicator", ["Input1"], ["Output1","Output2"], new dictionary&ltstring,string&gt ) to "";
+</code></dd>
+ *</dl>
+ */ 
+event Duplicator {
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Duplicator";
+	
+	// Algo specific variables
+	/** Local cached output Data stream names
+	 *  @private */
+	sequence<string> _outputDataNames;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                                 to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      new action<>,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, -1, 
+		                                         new sequence<string>,
+		                                         new sequence<string>,
+		                                         new sequence<boolean> );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Check that we have at least one input channel
+			if( config.outputDataNames.size() < 1 ) then	{
+				log "outputDataNames sequence should contain at least one entry." at ERROR;
+				log "  outputDataNames: " + config.outputDataNames.toString() at ERROR;
+				result := false;
+			} else {			
+				string currOutputName;
+				for currOutputName in config.outputDataNames {
+					string trimmedName := currOutputName.ltrim().rtrim();
+					if( trimmedName.length() = 0 ) then {
+						log "outputDataNames cannot contain blank strings." at ERROR;
+						result := false;
+					}
+				}
+			}
+			_outputDataNames := config.outputDataNames;
+		}
+		return result;
+	}
+	
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dIn ) {
+		log "Processing " + dIn.toString() at DEBUG;
+		
+		// Iterate over the set of output channel names 
+		// and duplicate the event on them all
+		string currOutputName;
+		for currOutputName in _outputDataNames {
+			Data dOut := dIn.clone();
+			dOut.streamName := currOutputName;
+			_analyticObject.sendData( dOut );
+		}
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Duplicator Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternDuplicatorChannel {
+	event StayAlive {}
+	
+	action onload() {
+		string discard := Duplicator.NAME.intern();
+		on all StayAlive() {}
+	}
+}

@@ -1,0 +1,901 @@
+//*****************************************************************************
+// Title: Filter Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+using com.industry.analytics.SourceIdsRequest;
+using com.industry.analytics.SourceIdsResponse;
+
+using com.apama.exceptions.Exception;
+
+/**
+ *  Event for the parsing and checking of numeric filters based on the
+ *  dValue, xValue, yValue and/or zValue of the Data event.
+ *
+ *  @private
+ */
+event NumericFilter
+{
+	constant string DVALUE := "dValue";
+	constant string XVALUE := "xValue";
+	constant string YVALUE := "yValue";
+	constant string ZVALUE := "zValue";
+	
+	constant integer LT   := -2;
+	constant integer LTEQ := -1;
+	constant integer EQ   := 0;
+	constant integer GTEQ := 1;
+	constant integer GT   := 2;
+	constant integer BT   := 3;
+	constant integer BTEQ := 4;
+	constant integer WO   := 5;
+	constant integer WOEQ := 6;
+	
+	boolean valid;
+	string valueId;
+	integer operator;
+	decimal dValue1;
+	decimal dValue2;
+	float fValue1;
+	float fValue2;
+	
+	
+	/**
+	 *  Static initialisation action for creating a NUmericFilter from a parameter and value
+	 *  provided in the Filter analytic configuration.
+	 *
+	 *  @param  valueId    The numeric member of the Data event. dValue, xValue, yValue or zValue. 
+	 *  @param  condition  The string to be parsed as a filter condition.
+	 *
+	 *  @returns The NumericFilter created from the parameters.
+	 *
+	 *  @private
+	 */
+	static action init(string valueId, string condition) returns NumericFilter
+	{
+		log "Parsing " + valueId + ":'" + condition + "'" at DEBUG;
+		NumericFilter nf := new NumericFilter;
+		
+		if valueId = DVALUE or valueId = XVALUE or valueId = YVALUE or valueId = ZVALUE then
+		{
+			nf.valueId := valueId;
+		}
+		else
+		{
+			log "Invalid valueId: " + valueId at ERROR;
+			return nf;
+		}
+
+		condition := condition.ltrim().rtrim();
+		string value := "";
+		if condition.matches("^<=>.*") then
+		{
+			nf.operator := WOEQ;
+			value := condition.substring(3, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^>=<.*") then
+		{
+			nf.operator := BTEQ;
+			value := condition.substring(3, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^<=.*") then
+		{
+			nf.operator := LTEQ;
+			value := condition.substring(2, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^<>.*") then
+		{
+			nf.operator := WO;
+			value := condition.substring(2, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^>=.*") then
+		{
+			nf.operator := GTEQ;
+			value := condition.substring(2, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^><.*") then
+		{
+			nf.operator := BT;
+			value := condition.substring(2, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^<.*") then
+		{
+			nf.operator := LT;
+			value := condition.substring(1, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^>.*") then
+		{
+			nf.operator := GT;
+			value := condition.substring(1, condition.length()).ltrim().rtrim();
+		}
+		else if condition.matches("^=.*") then
+		{
+			nf.operator := EQ;
+			value := condition.substring(1, condition.length()).ltrim().rtrim();
+		}
+		else
+		{
+			log "Invalid or missing operator at the start of '" + condition + "'." at ERROR;
+			return nf;
+		}
+		
+		if valueId = DVALUE then
+		{
+			if nf.operator >= BT then
+			{
+				// Need two values.
+				sequence<string> values := " ,".tokenize(value);
+				if values.size() != 2 then
+				{
+					log "Condition must have only two numeric values: " + condition at ERROR;
+					return nf;
+				}
+				else
+				{
+					nf.dValue1 := parseDecimal(values[0]);
+					nf.dValue2 := parseDecimal(values[1]);
+					if nf.dValue1.isNaN() or nf.dValue2.isNaN() then {return nf;}
+					if nf.dValue1 > nf.dValue2 then
+					{
+						decimal d := nf.dValue1;
+						nf.dValue1 := nf.dValue2;
+						nf.dValue2 := d;
+					}
+				}
+			}
+			else
+			{
+				nf.dValue1 := parseDecimal(value);
+				if nf.dValue1.isNaN() then {return nf;}
+			}
+		}
+		// We've already validated valueId above.
+		else
+		{
+			if nf.operator >= BT then
+			{
+				// Need two values.
+				sequence<string> values := " ,".tokenize(value);
+				if values.size() != 2 then
+				{
+					log "Condition must have only two numeric values: " + condition at ERROR;
+					return nf;
+				}
+				else
+				{
+					nf.fValue1 := parseFloat(values[0]);
+					nf.fValue2 := parseFloat(values[1]);
+					if nf.fValue1.isNaN() or nf.dValue2.isNaN() then {return nf;}
+					if nf.fValue1 > nf.fValue2 then
+					{
+						float f := nf.fValue1;
+						nf.fValue1 := nf.fValue2;
+						nf.fValue2 := f;
+					}
+				}
+			}
+			else
+			{
+				nf.fValue1 := parseFloat(value);
+				if nf.fValue1.isNaN() then {return nf;}
+			}
+		}
+		
+		nf.valid := true;
+		return nf;
+	}
+	
+	
+	/**
+	 *  Is this NumericFilter event correctly set up?
+	 *
+	 *  @returns A boolean indicating whether the NumericFilter has been correctly created.
+	 *
+	 *  @private
+	 */
+	action isValid() returns boolean
+	{
+		return valid;
+	}
+	
+	
+	/**
+	 *  Parse a decimal from a string with error checking.
+	 *
+	 *  @param  value  The string to be parsed as a decimal.
+	 *
+	 *  @returns The decimal value or NaN if parsing fails.
+	 *
+	 *  @private
+	 */
+	static action parseDecimal(string value) returns decimal
+	{
+		if decimal.canParse(value) then
+		{
+			return decimal.parse(value);
+		}
+		else
+		{
+			log "Invalid decimal value: " + value at ERROR;
+			return decimal.NAN;
+		}
+	}
+	
+	
+	/**
+	 *  Parse a float from a string with error checking.
+	 *
+	 *  @param  value  The string to be parsed as a float.
+	 *
+	 *  @returns The float value or NaN if parsing fails.
+	 *
+	 *  @private
+	 */
+	static action parseFloat(string value) returns float
+	{
+		if float.canParse(value) then
+		{
+			return float.parse(value);
+		}
+		else
+		{
+			log "Invalid float value: " + value at ERROR;
+			return float.NAN;
+		}
+	}
+	
+
+	/**
+	 *  Checks the provided Data event against the filter.
+	 *
+	 *  @param  dataIn  The Data to be compared against the filter.
+	 *
+	 *  @returns A boolean indicating whether the Data events passes or fails the filter.
+	 *
+	 *  @private
+	 */
+	action filter(Data dataIn) returns boolean
+	{
+		// In case this is being called on a uninitialised or badly set up instance, we'll just pass.
+		if not valid then {return true;}
+		
+		if valueId = DVALUE then
+		{
+			if operator = LT and dataIn.dValue < dValue1 then {return true;}
+			else if operator = LTEQ and dataIn.dValue <= dValue1 then {return true;}
+			else if operator = EQ and dataIn.dValue = dValue1 then {return true;}
+			else if operator = GTEQ and dataIn.dValue >= dValue1 then {return true;}
+			else if operator = GT and dataIn.dValue > dValue1 then {return true;}
+			else if operator = BT and dataIn.dValue > dValue1 and dataIn.dValue < dValue2 then {return true;}
+			else if operator = BTEQ and dataIn.dValue >= dValue1 and dataIn.dValue <= dValue2 then {return true;}
+			else if operator = WO and (dataIn.dValue < dValue1 or dataIn.dValue > dValue2) then {return true;}
+			else if operator = WOEQ and (dataIn.dValue <= dValue1 or dataIn.dValue >= dValue2) then {return true;}
+		}
+		else if valueId = XVALUE then
+		{
+			if operator = LT and dataIn.xValue < fValue1 then {return true;}
+			else if operator = LTEQ and dataIn.xValue <= fValue1 then {return true;}
+			else if operator = EQ and dataIn.xValue = fValue1 then {return true;}
+			else if operator = GTEQ and dataIn.xValue >= fValue1 then {return true;}
+			else if operator = GT and dataIn.xValue > fValue1 then {return true;}
+			else if operator = BT and dataIn.xValue > fValue1 and dataIn.xValue < fValue2 then {return true;}
+			else if operator = BTEQ and dataIn.xValue >= fValue1 and dataIn.xValue <= fValue2 then {return true;}
+			else if operator = WO and (dataIn.xValue < fValue1 or dataIn.xValue > fValue2) then {return true;}
+			else if operator = WOEQ and (dataIn.xValue <= fValue1 or dataIn.xValue >= fValue2) then {return true;}
+		}
+		else if valueId = YVALUE then
+		{
+			if operator = LT and dataIn.yValue < fValue1 then {return true;}
+			else if operator = LTEQ and dataIn.yValue <= fValue1 then {return true;}
+			else if operator = EQ and dataIn.yValue = fValue1 then {return true;}
+			else if operator = GTEQ and dataIn.yValue >= fValue1 then {return true;}
+			else if operator = GT and dataIn.yValue > fValue1 then {return true;}
+			else if operator = BT and dataIn.yValue > fValue1 and dataIn.yValue < fValue2 then {return true;}
+			else if operator = BTEQ and dataIn.yValue >= fValue1 and dataIn.yValue <= fValue2 then {return true;}
+			else if operator = WO and (dataIn.yValue < fValue1 or dataIn.yValue > fValue2) then {return true;}
+			else if operator = WOEQ and (dataIn.yValue <= fValue1 or dataIn.yValue >= fValue2) then {return true;}
+		}
+		else if valueId = ZVALUE then
+		{
+			if operator = LT and dataIn.zValue < fValue1 then {return true;}
+			else if operator = LTEQ and dataIn.zValue <= fValue1 then {return true;}
+			else if operator = EQ and dataIn.zValue = fValue1 then {return true;}
+			else if operator = GTEQ and dataIn.zValue >= fValue1 then {return true;}
+			else if operator = GT and dataIn.zValue > fValue1 then {return true;}
+			else if operator = BT and dataIn.zValue > fValue1 and dataIn.zValue < fValue2 then {return true;}
+			else if operator = BTEQ and dataIn.zValue >= fValue1 and dataIn.zValue <= fValue2 then {return true;}
+			else if operator = WO and (dataIn.zValue < fValue1 or dataIn.zValue > fValue2) then {return true;}
+			else if operator = WOEQ and (dataIn.zValue <= fValue1 or dataIn.zValue >= fValue2) then {return true;}
+		}
+		else
+		{
+			return true;
+		}
+		return false;
+	}
+}
+
+/* @AnalyticDefinition
+{
+	"name": "Filter",
+	"description": "Filter events by a condition.",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/Filter.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to filter"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Filtered",
+			"description": "The channel on which to output filtered data"
+		}
+	],
+	"properties": [
+		{
+			"name": "sourceId",
+			"description": "Event must have any of these sourceIds. eg. [\"sourceId1\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "!sourceId",
+			"description": "Event must not have any of these sourceIds. eg. [\"sourceId1\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "hasParam",
+			"description": "Event must have any of these params. eg. [\"param1\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "!hasParam",
+			"description": "Event must not have any of these params. eg. [\"param1\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "sValue",
+			"description": "Event must have any of these string values. eg. [\"abc\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "!sValue",
+			"description": "Event must not have any of these string values. eg. [\"abc\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "type",
+			"description": "Event must have any of these types. (Raw, Computed, Anomaly) eg. [\"r\", \"c\", \"a\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\s*\\[((\"[rca]\"\\s*,\\s*)*(\"[rca]\"))?\\s*\\]$/g) || 'Value must be a stringified sequence of r (Raw), c (Computed), or a (Anomaly) eg. [\"r\"]' }"
+		},{
+			"name": "!type",
+			"description": "Event must not have any of these types. (Raw, Computed, Anomaly) eg. [\"r\", \"c\", \"a\"]",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^\\s*\\[((\"[rca]\"\\s*,\\s*)*(\"[rca]\"))?\\s*\\]$/g) || 'Value must be a stringified sequence of r (Raw), c (Computed), or a (Anomaly) eg. [\"r\"]' }"
+		},{
+			"name": "dValue",
+			"description": "Check that the event's dValue meets a condition. Eg. '> 5.0'",
+			"type": "string",
+			"optional": true,
+			"validator": "function(value) { return value.match(/^(((<|>)=?|=)( +\\d+(\\.\\d+)?)|(<=?>|>=?<) +\\d+(\\.\\d+)?( +| *, *)\\d+(\\.\\d+)?)$/g) || 'Value must be a valid condition eg. >= 5.0' }"
+		},{
+			"name": "xValue",
+			"description": "Check that the event's xValue meets a condition. Eg. '> 5.0'",
+			"type": "string",
+			"optional": true,
+			"advanced":true,
+			"validator": "function(value) { return value.match(/^(((<|>)=?|=)( +\\d+(\\.\\d+)?)|(<=?>|>=?<) +\\d+(\\.\\d+)?( +| *, *)\\d+(\\.\\d+)?)$/g) || 'Value must be a valid condition eg. >= 5.0' }"
+		},{
+			"name": "yValue",
+			"description": "Check that the event's yValue meets a condition. Eg. '> 5.0'",
+			"type": "string",
+			"optional": true,
+			"advanced":true,
+			"validator": "function(value) { return value.match(/^(((<|>)=?|=)( +\\d+(\\.\\d+)?)|(<=?>|>=?<) +\\d+(\\.\\d+)?( +| *, *)\\d+(\\.\\d+)?)$/g) || 'Value must be a valid condition eg. >= 5.0' }"
+		},{
+			"name": "zValue",
+			"description": "Check that the event's zValue meets a condition. Eg. '> 5.0'",
+			"type": "string",
+			"optional": true,
+			"advanced":true,
+			"validator": "function(value) { return value.match(/^(((<|>)=?|=)( +\\d+(\\.\\d+)?)|(<=?>|>=?<) +\\d+(\\.\\d+)?( +| *, *)\\d+(\\.\\d+)?)$/g) || 'Value must be a valid condition eg. >= 5.0' }"
+		},{
+			"name": "sourceId_OnlyLeafNodes",
+			"description": "Check that the event's sourceId is a leaf node (in the DataSource hierarchy) of one of these dataSources. Eg. [\"ParentSource1\"]",
+			"type": "string",
+			"optional": true,
+			"advanced":true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+			"name": "sourceId_AllChildren",
+			"description": "Check that the event's sourceId is a child or nested child (in the DataSource hierarchy) of one of these dataSources. Eg. [\"ParentSource1\"]",
+			"type": "string",
+			"optional": true,
+			"advanced":true,
+			"validator": "function(value) { return value.match(/^\\[\\s*((\"[^\"]*\"\\s*,\\s*)*(\"[^\"]*\"))?\\s*\\]$/g) || 'Value must be a stringified sequence eg. [\"abc\"]' }"
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Filter Analytic filters the Data events passed through it based 
+ *  on the configuration parameters given below. Appropriate use of the 
+ *  <font face="courier" size="-1">sValue</font> filters can create a stream with just float 
+ *  values or just string values if desired.
+ * 
+ *  <b>Note:</b> When using the <font face="courier" size="-1">sourceId_OnlyLeafNodes</font> or <font face="courier" size="-1">sourceId_AllChildren</font> 
+ *  filters, applications must first define the relationships/grouping of DataSources using the 
+ *  com.industry.analytics.DataSource event.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream channel name must be provided. All the 
+ *      <font face="courier" size="-1">params</font> from the input Data are 
+ *      copied to the filtered <font face="courier" size="-1">Data</font> event.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream channel name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>sourceId</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">sourceId</font> that matches  
+ *                                 at least ONE of the set of defined sourceIds are allowed through. 
+ *                                 A stringified empty sequence is treated as "allow any value".<br><br>
+ *                                 <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">sourceId</font> and the
+ *                                 <font face="courier" size="-1">!sourceId</font> configuration parameter, then the Data event WILL NOT be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of sourceIds to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>!sourceId</b></td><td>If defined, Data events which have a <font face="courier" size="-1">sourceId</font> that matches  
+ *                                  matches ANY of the set of defined sourceIds are NOT allowed through. 
+ *                                  A stringified empty sequence is treated as "allow any value".<br><br>
+ *                                  <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">sourceId</font> and the
+ *                                  <font face="courier" size="-1">!sourceId</font> configuration parameter, then the Data event WILL NOT be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of sourceIds to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>hasParam</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">param</font> that 
+ *                                  matches at least ONE of the set of defined <font face="courier" size="-1">hasParam</font> values are allowed through. 
+ *                                  A stringified empty sequence is treated as "allow any value".<br><br>
+ *                                  <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">hasParam</font> and the
+ *                                  <font face="courier" size="-1">!hasParam</font> configuration parameter, then the Data event WILL be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of params to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>!hasParam</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">param</font> that 
+ *                                   matches ANY of the set of defined <font face="courier" size="-1">!hasParam</font> values are NOT allowed through. 
+ *                                   A stringified empty sequence is treated as "allow any value".<br><br>
+ *                                   <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">hasParam</font> and the
+ *                                   <font face="courier" size="-1">!hasParam</font> configuration parameter, then the Data event WILL be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of params to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>sValue</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">sValue</font> that matches  
+ *                                     at least ONE of the set of defined string values are allowed through. 
+ *                                     A stringified empty sequence is treated as "allow any value".<br><br>
+ *                                     <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">sValue</font> and the
+ *                                     <font face="courier" size="-1">!sValue</font> configuration parameter, then the Data event WILL NOT be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of sValues to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>!sValue</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">sValue</font> that matches  
+ *                                      ANY of the set of defined string values are NOT allowed through. 
+ *                                      A stringified empty sequence is treated as "allow any value".<br><br>
+ *                                      <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">sValue</font> and the
+ *                                      <font face="courier" size="-1">!sValue</font> configuration parameter, then the Data event WILL NOT be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of sValues to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>type</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">type</font> that matches  
+ *                              at least ONE of "r" Raw , "c" Computed, or "a" Anomaly. 
+ *                              A stringified empty sequence is treated as "allow any value".<br><br>
+ *                              <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">type</font> and the
+ *                              <font face="courier" size="-1">!type</font> configuration parameter, then the Data event WILL NOT be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of Types to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>!type</b></td><td>If defined, only Data events which have a <font face="courier" size="-1">type</font> that matches  
+ *                               ANY of "r" Raw , "c" Computed, or "a" Anomaly are NOT allowed through. 
+ *                               A stringified empty sequence is treated as "allow any value".<br><br>
+ *                               <b>Note:</b> If the same value appears in both the <font face="courier" size="-1">type</font> and the
+ *                               <font face="courier" size="-1">!type</font> configuration parameter, then the Data event WILL NOT be filtered.</td>
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of Types to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>sourceId_OnlyLeafNodes</b></td><td>If defined, only Data events which have an <font face="courier" size="-1">sourceId</font> 
+ *                                          which is a leaf node DataSource below the specified DataSource Id in the hierarchy will be allowed through
+ *                                          A stringified empty sequence is treated as "allow any value".
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of sourceIds to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>sourceId_AllChildren</b></td><td>If defined, only Data events which have an <font face="courier" size="-1">sourceId</font> 
+ *                                           which is a child DataSource that is has the specified DataSource Id as a parent
+ *                                           ancestor in the hierarchy will be allowed through.
+ *                                           A stringified empty sequence is treated as "allow any value".
+ *      <td>Empty string, or a stringified <font face="courier" size="-1">sequence&ltstring&gt</font> containing the set of sourceIds to filter on</td>
+ *      <td>Stringified <font face="courier" size="-1">sequence&ltstring&gt</font></td><td>False</td><td><font face="courier" size="-1">"[]"</font></td></tr>
+ *  <tr><td><b>dValue<br>xValue<br>yValue<br>zValue</b></td>
+ *      <td>For each of the numeric members of the Data event a filter condition can be specified. The operator always comes first,
+ *          followed by one or two bounding values. If two values are requires they can be separated by a space or comma.<br>
+ *  	    <font face="courier" size="-1">&lt; X</font>  less than<br>
+ *          <font face="courier" size="-1">&lt;= X</font>  less than or equal<br>
+ *  	    <font face="courier" size="-1">= X</font>  equals<br>
+ *  	    <font face="courier" size="-1">&gt;= X</font>  greater than or equal<br>
+ *  	    <font face="courier" size="-1">&gt; X</font>  greater than<br>
+ *  	    <font face="courier" size="-1">&gt;&lt; X Y</font>  between<br>
+ *  	    <font face="courier" size="-1">&gt;=&lt; X Y</font>  between inclusive<br>
+ *  	    <font face="courier" size="-1">&lt;&gt; X Y</font>  without<br>
+ *  	    <font face="courier" size="-1">&lt;=&gt; X Y</font>  without inclusive
+ *      <td>Non-empty string containing condition.</td>
+ *      <td>String</td><td>False</td><td></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+// Define a Filter Analytic which takes Data events on the channel "Input1"  
+// and filters out any Data events from the data source "MySensor" that are not 
+// anomalies (IE just filter raw and computed values).
+send com.industry.analytics.Analytic("Filter", ["Input1"], ["Output1"], {"sourceId":"MySensor","!type":DataConstants.ANOMALY } ) to "";
+
+// Define a Filter Analytic which takes Data events on the channel "Input1"  
+// and filters out any Data events except those which have a dValue parameter 
+// of between 15.0 and 30.0.
+send com.industry.analytics.Analytic("Filter", ["Input1"], ["Output1"], {"dValue":">< 15.0, 30.0"} ) to "";
+</code></dd>
+ *  </dl>
+ *   @see com.industry.analytics.DataSource  The DataSource event that is used to define groups of DataSources. This is required if 
+ *                                           using the <font face="courier" size="-1">sourceId_AllChildren</font> or <font face="courier" size="-1">sourceId_OnlyLeafNodes</font> filters.
+ */
+event Filter
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Filter";
+	
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by the Data events <font face="courier" size="-1">type</font> parameter */
+	constant string TYPE := "type";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by the Data events <font face="courier" size="-1">sourceId</font> parameter */
+	constant string SOURCEID := "sourceId";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by the Data events <font face="courier" size="-1">params</font> parameter */
+	constant string HASPARAM := "hasParam";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by the Data events <font face="courier" size="-1">sValue</font> parameter */
+	constant string SVALUE   := "sValue";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by not having the Data events <font face="courier" size="-1">type</font> parameter */
+	constant string NOT_TYPE := "!type";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by not having the Data events <font face="courier" size="-1">sourceId</font> parameter */
+	constant string NOT_SOURCEID := "!sourceId";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by not having the Data events <font face="courier" size="-1">params</font> parameter */
+	constant string NOT_HASPARAM := "!hasParam";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering by not having the Data events <font face="courier" size="-1">sValue</font> parameter */
+	constant string NOT_SVALUE := "!sValue";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering where the Data events <font face="courier" size="-1">sourceId</font> parameter 
+	 *  is a terminating leaf node in the hierarchical tree of DataSources (IE it has 
+	 *  no associated child DataSources) associated with the parent sourceId defined 
+	 *  by this parameter */
+	constant string SOURCEID_ONLYLEAFNODES := "sourceId_OnlyLeafNodes";
+	/** This constant defines the configuration parameter name
+	 *  that allows filtering where the Data events <font face="courier" size="-1">sourceId</font> parameter 
+	 *  is a node in the hierarchical tree of DataSources associated with the parent 
+	 *  sourceId defined by this parameter */
+	constant string SOURCEID_ALLCHILDREN   := "sourceId_AllChildren";
+	
+	
+	// Algo specific variables	
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	
+	/** Local cached value for the type filter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _typeFilter;
+	/** Local cached value for the sourceIdfilter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _sourceIdFilter;
+	/** Local cached value for the param filter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _paramFilter;
+	/** Local cached value for the sValue filter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _sValueFilter;
+	/** Local cached value for the NOT type filter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _notTypeFilter;
+	/** Local cached value for the NOT sourceIdfilter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _notSourceIdFilter;
+	/** Local cached value for the NOT param filter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _notParamFilter;
+	/** Local cached value for the NOT sValue filter configuration parameter value
+	 *  @private */
+	dictionary<string, boolean> _notsValueFilter;
+	/** Local cached value for numeric filters
+	 *  @private */
+	sequence<NumericFilter> _numericFilters;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		// Subscribe to the DataSource management channel
+		monitor.subscribe( Constants.DATASOURCE_MGMT_CHANNEL );
+		
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      new action<>,
+		                      initComplete );
+	}
+		
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ TYPE,               SOURCEID, 
+		      		                               HASPARAM,           SVALUE, 
+		      		                               NOT_TYPE,           NOT_SOURCEID,
+		      		                               NOT_HASPARAM,       NOT_SVALUE, 
+		      		                               SOURCEID_ONLYLEAFNODES, SOURCEID_ALLCHILDREN,
+		      		                               NumericFilter.DVALUE, NumericFilter.XVALUE,
+		      		                               NumericFilter.YVALUE, NumericFilter.ZVALUE],
+		      		                           	 [ Constants.SEQUENCE_STRING, Constants.SEQUENCE_STRING,
+		      		                               Constants.SEQUENCE_STRING, Constants.SEQUENCE_STRING,
+		      		                               Constants.SEQUENCE_STRING, Constants.SEQUENCE_STRING,
+		      		                               Constants.SEQUENCE_STRING, Constants.SEQUENCE_STRING,
+		      		                               Constants.SEQUENCE_STRING, Constants.SEQUENCE_STRING,
+		      		                               Constants.STRING, Constants.STRING,
+		      		                               Constants.STRING, Constants.STRING],
+		      		                             [ false, false,
+		      		                               false, false,
+		      		                               false, false,
+		      		                               false, false,
+		      		                               false, false,
+		      		                               false, false,
+		      		                               false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+	
+			// Cache the parameter values in a dictionary for a more
+			// efficient lookup
+			string entry;
+			for entry in config.getSequenceString(TYPE)         { _typeFilter.add( entry, false ); }
+			for entry in config.getSequenceString(SOURCEID)     { _sourceIdFilter.add( entry, false ); }
+			for entry in config.getSequenceString(HASPARAM)     { _paramFilter.add( entry, false ); }
+			for entry in config.getSequenceString(SVALUE)       { _sValueFilter.add( entry, false ); }
+			for entry in config.getSequenceString(NOT_TYPE)     { _notTypeFilter.add( entry, false ); }
+			for entry in config.getSequenceString(NOT_SOURCEID) { _notSourceIdFilter.add( entry, false ); }
+			for entry in config.getSequenceString(NOT_HASPARAM) { _notParamFilter.add( entry, false ); }
+			for entry in config.getSequenceString(NOT_SVALUE)   { _notsValueFilter.add( entry, false ); }
+			for entry in config.getSequenceString(SOURCEID_ONLYLEAFNODES)
+			{
+				SourceIdsResponse request;
+				on SourceIdsResponse(sourceId=entry):request {
+					string id;
+					for id in request.sourceIds	{
+						_sourceIdFilter.add( id, false );
+					}
+				}
+				send SourceIdsRequest(entry, true) to Constants.DATASOURCE_MGMT_CHANNEL;
+			}
+			for entry in config.getSequenceString(SOURCEID_ALLCHILDREN)
+			{
+				SourceIdsResponse request;
+				on SourceIdsResponse(sourceId=entry):request {
+					string id;
+					for id in request.sourceIds	{
+						_sourceIdFilter.add( id, false );
+					}
+				}
+				send SourceIdsRequest(entry, false) to Constants.DATASOURCE_MGMT_CHANNEL;
+			}
+			if( config.hasParam( NumericFilter.DVALUE ) ) then {
+				NumericFilter nf := NumericFilter.init( NumericFilter.DVALUE, config.getString( NumericFilter.DVALUE ) );
+				if nf.isValid() then {_numericFilters.append(nf);} else {result := false;}
+			}
+			if( config.hasParam( NumericFilter.XVALUE ) ) then {
+				NumericFilter nf := NumericFilter.init(NumericFilter.XVALUE, config.getString( NumericFilter.XVALUE ) );
+				if nf.isValid() then {_numericFilters.append(nf);} else {result := false;}
+			}
+			if( config.hasParam( NumericFilter.YVALUE ) ) then {
+				NumericFilter nf := NumericFilter.init(NumericFilter.YVALUE, config.getString( NumericFilter.YVALUE ) );
+				if nf.isValid() then {_numericFilters.append(nf);} else {result := false;}
+			}
+			if( config.hasParam( NumericFilter.ZVALUE ) ) then {
+				NumericFilter nf := NumericFilter.init(NumericFilter.ZVALUE, config.getString( NumericFilter.ZVALUE ) );
+				if nf.isValid() then {_numericFilters.append(nf);} else {result := false;}
+			}
+		}
+
+		return result;
+	}
+		
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData(Data dataIn)
+	{
+		log "Processing " + dataIn.toString() at DEBUG;
+
+		if (_sValueFilter.size() > 0 and not _sValueFilter.hasKey(dataIn.sValue)) or
+		   (_notsValueFilter.size() > 0 and _notsValueFilter.hasKey(dataIn.sValue)) then
+		{
+			return;
+		}
+		
+		if (_typeFilter.size() > 0 and not _typeFilter.hasKey(dataIn.type)) or
+		   (_notTypeFilter.size() > 0 and _notTypeFilter.hasKey(dataIn.type)) then
+		{
+			return;
+		}
+		
+		if (_sourceIdFilter.size() > 0 and not _sourceIdFilter.hasKey(dataIn.sourceId)) or
+		   (_notSourceIdFilter.size() > 0 and _notSourceIdFilter.hasKey(dataIn.sourceId)) then
+		{
+			return;
+		}
+		
+		if _paramFilter.size() > 0 then
+		{
+			boolean block := true;
+			string param;
+			for param in dataIn.params.keys()
+			{
+				if _paramFilter.hasKey(param) then
+				{
+					block := false;
+					break;
+				}
+			}
+			if block then {return;}
+		}
+		if _notParamFilter.size() > 0 then
+		{
+			string param;
+			for param in dataIn.params.keys()
+			{
+				if _notParamFilter.hasKey(param) then
+				{
+					return;
+				}
+			}
+		}
+		NumericFilter nf;
+		for nf in _numericFilters
+		{
+			if not nf.filter(dataIn) then
+			{
+				return;
+			}
+		}
+		
+		Data dataOut := dataIn.clone();
+		dataOut.streamName := _outputDataName;
+		if dataOut.type = DataConstants.RAW then {dataOut.type := DataConstants.COMPUTED;}
+		_analyticObject.sendData(dataOut);
+	}
+}
+
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Filter Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternFilter
+{
+	event StayAlive {}
+	
+	action onload()
+	{
+		string discard := Filter.NAME.intern();
+		discard := Filter.TYPE.intern();
+		discard := Filter.SOURCEID.intern();
+		discard := Filter.HASPARAM.intern();
+		discard := Filter.SVALUE.intern();
+		discard := Filter.NOT_TYPE.intern();
+		discard := Filter.NOT_SOURCEID.intern();
+		discard := Filter.NOT_HASPARAM.intern();
+		discard := Filter.NOT_SVALUE.intern();
+		discard := Filter.SOURCEID_ONLYLEAFNODES.intern();
+		discard := Filter.SOURCEID_ALLCHILDREN.intern();
+		discard := NumericFilter.DVALUE.intern();
+		discard := NumericFilter.XVALUE.intern();
+		discard := NumericFilter.YVALUE.intern();
+		discard := NumericFilter.ZVALUE.intern();
+		on all StayAlive() {}
+	}
+}

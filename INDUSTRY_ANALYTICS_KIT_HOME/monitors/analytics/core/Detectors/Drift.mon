@@ -1,0 +1,528 @@
+//*****************************************************************************
+// Title: Drift Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.detectors;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+using com.industry.analytics.TimeWeightedVariance;
+
+/** 
+ *  Storage event for holding the boundaries to be used for comparison.
+ *  Populated after the initial offsetPeriod value.
+ *
+ *  @private
+ */
+event Boundaries {
+	decimal lower;
+	decimal upper;
+}
+
+
+/** 
+ *  Event for keeping track of the offsetPeriod variance calculation.
+ *  However, beyond the variance we also need to keep track of the timestamp
+ *  of the first event we received to know when to finish.
+ *
+ *  @private
+ */
+event BaselineCalculation {
+	decimal initialTimestamp;
+	TimeWeightedVariance twv;
+	
+	action init( Data dataIn, decimal timeWindow ) {
+		initialTimestamp := dataIn.timestamp;
+		twv.init( dataIn.dValue, dataIn.timestamp, timeWindow );
+	}
+	
+	action update( Data dataIn ) {
+		twv.update( dataIn.dValue, dataIn.timestamp );
+	}
+}
+
+/* @AnalyticDefinition
+{
+	"name": "Drift",
+	"description": "Detect data outside of a 'usual data' boundary.",
+	"group": "Detectors",
+	"documentation": "com/industry/analytics/detectors/Drift.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to check for drift",
+			"dataProperties": ["dValue"]
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Drift",
+			"description": "The channel on which to output drift anomalies"
+		}
+	],
+	"properties": [
+		{			
+			"name": "offset",
+			"description": "The amount of 'drift' allowed relative to the mean. The value applied depends on the offsetType used",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"defaultValue": 2.0,
+			"optional": true
+		},{
+			"name": "offsetType",
+			"description": "The type of the value that is used as the offset",
+			"type": "string",
+			"validValues": ["stddev", "absolute", "percentage"],
+			"defaultValue": "stddev",
+			"optional": true
+		},{
+			"name": "offsetPeriod",
+			"description": "Defines the period over which the initial moving average is calculated.",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"defaultValue": 60.0,
+			"optional": true,
+			"postfix": "(Seconds)"
+		},{
+			"name": "lowerOffsetOverride",
+			"description": "If this value is provided, it overrides the value calculated for the lower boundary.",
+			"type": "decimal",
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }",
+			"optional": true,
+			"advanced":true
+		},{
+			"name": "bySourceId",
+			"description": "If defined, the Drift calculations are partitioned based on the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The Drift Analytic monitors a sources <font face="courier" size="-1">dValue</font> to ensure
+ *  that it doesn't go outside of a set boundary or pair of boundaries.
+ *  If a boundary is breached then an anomaly Data is generated.
+ *  Once set these boundaries are fixed, unlike, for example, a Bollinger Band
+ *  which will mutate along with a slow moving drift in values.
+ * 
+ *  The boundary values are based upon a moving average taken over a defined initial 
+ *  period for the data source. The boundaries will then be set at a number of standard 
+ *  deviations, a given value, or a percentage above and/or below the final moving
+ *  average value.
+ *
+ *  The moving average and standard deviation are calculated using the same formulas as in
+ *  the Volatility Analytic.
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  <dd><b>Note:</b> The input Data events timestamp value should be defined as the number of seconds since the epoch (1st January 1970).</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. All the <font face="courier" size="-1">params</font>
+ *      from the Data that breaches the threshold are copied to the anomaly Data.<br></dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>offset</b><td>The amount of 'drift' allowed relative to the mean. The value applied depends on the offsetType used</td>
+ *      <td><font face="courier" size="-1">>0.0d</font></td></td><td>decimal</td><td>False</td><td>2.0d</td></tr>
+ *  <tr><td><b>offsetType</b><td>The type of the value that is used as the offset</td>
+ *      <td><font face="courier" size="-1">"stddev", "absolute", "percentage"</font></td></td><td>string</td><td>False</td><td><font face="courier" size="-1">"stddev"</font></td></tr>
+ *  <tr><td><b>offsetPeriod</b><td>Defines the period over which the initial moving average is calculated.</td>
+ *      <td>Stringified decimal <font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>False</td><td>60.0</td></tr>
+ *  <tr><td><b>lowerOffsetOverride</b><td>If this value is provided, it overrides the value calculated for the lower boundary.</td>
+ *      <td><font face="courier" size="-1">>0.0d</font></td><td>Decimal</td><td>False</td><td>The <font face="courier" size="-1">offset</font> value</td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the Drift calculations are partitioned based on the <font face="courier" size="-1">sourceId</font> of the <font face="courier" size="-1">Data</font> events</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+// Define a Drift Analytic to monitor Data events on the channel "Input1"
+// and generate a boundary based on a value 1.2 standard deviations away from the moving average
+// for that Data stream over a 30 second window. An anomaly Data event will be 
+// generated on the channel "Output1" if the value goes outside that range.
+send com.industry.analytics.Analytic("Drift", ["Input3"], ["Output3"], {"offset":"1.2", "offsetPeriod":"30"}) to "";
+
+// Define a Drift Analytic to monitor Data events on the channel "Input2"
+// and generate a boundary based on a fixed value away from the moving average
+// for that Data stream over an initial 60 second window. An anomaly Data event 
+// will be generated  on the channel "Output2" if the value goes outside that range.
+send com.industry.analytics.Analytic("Drift", ["Input3"], ["Output3"], {"offset":"60", "offsetType":"absolute", "offsetPeriod":"60"}) to "";
+   
+// Define a Drift Analytic to monitor Data events on the channel "Input3"
+// and generate a boundary based on a value 30% away from the moving average
+// for that Data stream over a 20 second window. An anomaly Data event will be 
+// generated on the channel "Output3" if the value goes outside that range.
+send com.industry.analytics.Analytic("Drift", ["Input3"], ["Output3"], {"offset":"30", "offsetType":"percentage", "offsetPeriod":"20"}) to "";
+</code></dd>
+ *  </dl>
+ *
+ *  @see com.industry.analytics.Volatility  The Volatility Analytic.
+ */
+event Drift {
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "Drift";
+	
+	/** This constant defines the configuration parameter name
+	 *  that specifies the boundary offset value. */
+	constant string OFFSET := "offset";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the type of the offset value defined. */
+	constant string OFFSET_TYPE := "offsetType";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the overridden lower offset value, if used. */
+	constant string LOWER_OFFSET_OVERRIDE := "lowerOffsetOverride";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the period over which the initial boundary moving
+	    average is calculated.*/
+	constant string OFFSET_PERIOD := "offsetPeriod";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the drift calculation will be
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+	
+	/** Constant defining whether the given offset is a value.
+	 *  @private */
+	constant string OFFSET_ABSOLUTE := "absolute";
+	/** Constant defining whether the given offset is a percentage.
+     *  @private */
+	constant string OFFSET_PERCENTAGE := "percentage";
+	/** Constant defining whether the given offset is a standard deviation multiple.
+	 *  @private */
+	constant string OFFSET_STD_DEV := "stddev";
+	
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	
+	// State
+	/** Local cached dictionary of the baseline calculations in progress, keyed by
+	 *  the sourceId.
+	 *  @private */
+	dictionary<string /*sourceId*/, BaselineCalculation> _calculations;
+	/** Local cached dictionary of the calculated baselines in use, keyed by
+	 *  the sourceId.
+	 *  @private */
+	dictionary<string /*sourceId*/, Boundaries> _boundaries;
+
+	/** Local cached value for the baseline configuration parameter value
+	 *  @private */
+	decimal _offset;
+	/** Local cached value for the baseline configuration parameter type
+	 *  @private */
+	string _offsetType;
+	/** Local cached value for the baseline2 configuration parameter value
+	 *  @private */
+	decimal _lowerOffsetOverride;
+	/** Local cached value for the offsetPeriod configuration parameter value
+	 *  @private */
+	decimal _offsetPeriod;	
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId;
+	
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ OFFSET, OFFSET_TYPE, 
+		                                           OFFSET_PERIOD, LOWER_OFFSET_OVERRIDE,
+		                                           BY_SOURCEID ],
+		                                         [ Constants.DECIMAL, Constants.STRING,
+		                                           Constants.DECIMAL, Constants.DECIMAL,
+		                                           Constants.BOOLEAN ],
+		                                         [ false, false, 
+		                                           false, false,
+		                                           false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+
+			_offset := config.getOrDecimal( OFFSET, 2.0d );
+			if( _offset <= 0.0d ) then {
+				log "  Param offset must be greater than zero. Given value: " + _offset.toString() at ERROR;
+				result := false;
+			}
+
+			_offsetType := config.getOrString( OFFSET_TYPE, OFFSET_STD_DEV ).ltrim().rtrim().toLower();
+			if( _offsetType != OFFSET_STD_DEV
+			and _offsetType != OFFSET_PERCENTAGE
+			and _offsetType != OFFSET_ABSOLUTE ) then {
+				log "  Param offsetType must be one of "+OFFSET_STD_DEV+", "+OFFSET_ABSOLUTE+", or "+OFFSET_PERCENTAGE+". Given value: " + _offsetType.toString() at ERROR;
+				result := false;
+			}
+			
+			_offsetPeriod := config.getOrDecimal( OFFSET_PERIOD, 60.0d );
+			if( _offsetPeriod <= 0.0d ) then {
+				log "  Param offsetPeriod must be greater than zero. Given value: " + _offsetPeriod.toString() at ERROR;
+				result := false;
+			}
+			
+			_lowerOffsetOverride := config.getOrDecimal( LOWER_OFFSET_OVERRIDE, _offset );
+			if( _lowerOffsetOverride <= 0.0d ) then {
+				log "  Param lowerOffsetOverride must be greater than zero. Given value: " + _lowerOffsetOverride.toString() at ERROR;
+				result := false;
+			}
+			
+			_bySourceId := config.getOrBoolean( BY_SOURCEID, true );
+		} 		
+		return result;
+	}
+	
+	/** 
+	 *  This helper action creates a Boundaries event based upon
+	 *  the offset value and type configuration parameters and the 
+	 *  calculated moving average and standard deviation as appropriate.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   var  A time weighted variance calculation event.
+	 *  @returns      A Boundaries event based on the input parameters and var.
+	 * 
+	 *  @private
+	 */
+	action _setBoundaries( TimeWeightedVariance var ) returns Boundaries {
+		log "_offset: " + _offset.toString() at DEBUG;
+		log "_offsetType: " + _offsetType.toString() at DEBUG;
+		log "_lowerOffsetOverride: " + _lowerOffsetOverride.toString() at DEBUG;
+		
+		Boundaries b := Boundaries( decimal.NAN, decimal.NAN );
+
+		// Calculate the upper and lower boundaries based on the offsetType
+		if( _offsetType = OFFSET_STD_DEV ) then {
+			b.upper := var.eMa() + (var.eStDev() * _offset );
+			b.lower := var.eMa() - (var.eStDev() * _lowerOffsetOverride );
+		} else if( _offsetType = OFFSET_ABSOLUTE ) then {
+			b.upper := var.eMa() + _offset;
+			b.lower := var.eMa() - _lowerOffsetOverride;
+		} else { /* OFFSET_PERCENTAGE */
+			b.upper := var.eMa() + (var.eMa() * ( _offset / 100.0d));
+			b.lower := var.eMa() - (var.eMa() * ( _lowerOffsetOverride / 100.0d));
+		}
+		return b;
+	}
+	
+	
+	/** 
+	 *  This helper action checks the dValue of a Data event against the
+	 *  values in the Boundaries event. If the dataIn dValue breaches one of the
+	 *  boundaries then an anomaly Data event is sent containing the
+	 *  breaching value.
+	 *  A breach occurs if dataIn.dValue > offset.upper or
+	 *                     dataIn.dValue < offset.lower.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   dataIn    The Data event being examined for a boundary breach.
+	 *  @param   boundary  The boundaries being examined against for a breach.
+	 * 
+	 *  @private
+	 */
+	action _checkBoundaries( Data dataIn, Boundaries boundary ) {
+		Data dataOut;
+		if( ( not boundary.upper.isNaN() and dataIn.dValue > boundary.upper )
+		or  ( not boundary.lower.isNaN() and dataIn.dValue < boundary.lower ) ) then {
+			// Copy the input Data event and change the type to 
+			// an anomaly
+			dataOut := dataIn.clone();
+			dataOut.streamName := _outputDataName;
+			dataOut.type       := DataConstants.ANOMALY;
+			dataOut.params[Constants.ANOMALY_SOURCE] := NAME;
+			
+			// Send the data to the output channel
+			_analyticObject.sendData( dataOut );
+		}
+	}
+
+
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  The action either progresses the initial baseline moving average
+	 *  calculation, or checks to see whether the incoming Data has
+	 *  breaches the boundary values.
+ 	 * 
+ 	 *  @private
+ 	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		// Check if we have calculated the boundaries for this Data source 
+		if( _boundaries.hasKey( sourceId ) ) then {
+			_checkBoundaries( dataIn, _boundaries[ sourceId ] );
+		} else { 
+			// Or are we still deriving the baseline?
+			if( _calculations.hasKey( sourceId ) ) then {
+				// Get the existing calculation and update it
+				BaselineCalculation bc := _calculations[ sourceId ];
+				bc.update( dataIn );
+				
+				// If the current Data timestamp exceeded the defined offsetPeriod
+				if( ( dataIn.timestamp - bc.initialTimestamp ) >= _offsetPeriod ) then {
+					// Calculate the Boundary values based on a Time Weighted Variance
+					_boundaries[ sourceId ] := _setBoundaries( bc.twv );
+					log "Boundaries for sourceId " + sourceId +
+						": " + _boundaries[ sourceId ].toString() at DEBUG;
+					
+					// Remove the sourceId from the Calculations cache
+					// as it has now been calculated.
+					_calculations.remove( sourceId );
+				}
+			} else {
+				// Create a new Baseline Calculation for this Data source
+				BaselineCalculation bc := new BaselineCalculation;
+				bc.init( dataIn, _offsetPeriod );
+				_calculations.add( sourceId, bc );
+			}
+		}
+	}
+	
+	
+	/**
+	 *  Optional action to reset the state of the analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @private
+	 */
+	action reset() {
+		_calculations.clear();
+		_boundaries.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Drift Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive for a Persistant  
+ *        Correlator's recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered,  
+ *        which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternDrift
+{
+	event StayAlive {}
+	
+	action onload()
+	{
+		string discard := Drift.NAME.intern();
+		discard := Drift.OFFSET.intern();
+		discard := Drift.OFFSET_TYPE.intern();
+		discard := Drift.OFFSET_PERIOD.intern();
+		discard := Drift.LOWER_OFFSET_OVERRIDE.intern();
+		discard := Drift.BY_SOURCEID.intern();
+		discard := Drift.OFFSET_ABSOLUTE.intern();
+		discard := Drift.OFFSET_PERCENTAGE.intern();
+		discard := Drift.OFFSET_STD_DEV.intern();
+		discard := Drift.CONST_INTERNAL_ALL_SOURCES.intern();
+		on all StayAlive() {}
+	}
+}

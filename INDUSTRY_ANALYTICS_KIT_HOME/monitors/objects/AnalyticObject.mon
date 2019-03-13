@@ -1,0 +1,615 @@
+//*****************************************************************************
+// Title:         AnalyticObject
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+
+/** Internally generated event to kill any input channel listeners.
+ *  @private  */
+event KillInputChannelListeners
+{
+	integer id;
+}
+
+
+/** Internally generated event to kill any management channel listeners.
+ *  @private */
+event KillManagementChannelListeners
+{
+	integer id;
+}
+
+
+/**
+ *  The AnalyticObject event defines the base functionality
+ *  that is common across all Analytic implementations.  This
+ *  object provides functionality to setup any listeners that 
+ *  are required, and to send generated Data events to 
+ *  the set of places required. 
+ *  
+ *  User-defined implementations of a Analytic should use the
+ *  AnalyticInterface instance that is returned from the 
+ *  #init() action to control/manage the base functionality 
+ *  of a Analytic.
+ *
+ *  @see  com.industry.analytics.Data     The Data event that Analytics process 
+ *  @see  com.industry.analytics.Analytic   The Analytic configuration object 
+ *  @see  com.industry.analytics.AnalyticInterface   The action interface that should 
+ *                                              used to control/manage the Analytic 
+ *                                              implementations base functionality. 
+ */
+event AnalyticObject {
+	/** This constant defines the name of the channel 
+	 *  that is used by Apama Queries.
+	 *  @private */
+	constant string QUERY_CHANNEL := "com.apama.queries";
+	/** This constant defines the configuration parameter name 
+	 *  that is can be provided in set of Analytic <font face="courier" size="-1">params</font>.  
+	 *  This boolean flag defines whether or not the Analytic instance 
+	 *  will send all generated Data events to a channel defined by
+	 *  the Data name.  This is not mutually exclusive to the
+	 *  <font face="courier" size="-1">"sendResultToQueryChannel"</font> configuration param.
+	 *  @private */
+	constant string SEND_TO_CHANNEL := "sendResultToChannel";
+	/** This constant defines the configuration parameter name 
+	 *  that is can be provided in set of Analytic <font face="courier" size="-1">params</font>.  
+	 *  This boolean flag defines whether or not the Analytic instance 
+	 *  will send all generated Data events to the channel defined 
+	 *  for handling Apama Queries (I.E. "com.apama.queries").
+	 *  This is not mutually exclusive to the <font face="courier" size="-1">"sendResultToChannel"</font> 
+	 *  configuration param.
+	 *  @private */
+	constant string SEND_TO_QUERY_CHANNEL := "sendResultToQueryChannel";
+    
+	/** This is an internally generated unique identifier for the 
+	 *  AnalyticObject. Used for the KillListener event, for example.
+	 *  @private **/
+	integer _id;
+	/** This is an external id, provided as a param within the Analytic event
+	 *  for picking up the relevant AnalyticManagement events. This is not
+	 *  necessarily unique, allowing a chain of Analytics to all
+	 *  respond to the same management event. */
+	string _managementId;
+	/** This boolean flag indicates whether or not the Analytic is currently
+	 *  started or not.
+	 *  @private **/
+	boolean _started;
+	/** This boolean flag indicates whether or not the Analytic is listening
+	 *  to events being sent on the Data events input channel.
+	 *  @private **/
+	boolean _getInputFromChannel;
+	/** This boolean flag indicates whether or not the Analytic will  
+	 *  send all generated Data events to a channel defined by the 
+     *  Data name.
+	 *  @private **/
+	boolean _sendResultToChannel;
+	/** This boolean flag indicates whether or not the Analytic will  
+	 *  send all generated Data events to the channel defined for 
+     *  handling Apama Queries (I.E. "com.apama.queries").
+	 *  @private **/
+	boolean _sendResultToQueryChannel;
+	/** A local cache of callback actions that have been defined for 
+	 *  a specific input Data, keyed by the input Data name.
+	 *  @private **/
+	dictionary<string, sequence<action<Data> > > _sendCallbacks;
+	/** A local cache of the last received Data from each input channel.
+	 *  @private */
+	dictionary<string, Data> _currentDataStreams;
+	/** Whether processDataStream should be called synchronously or not.
+	 *  @private */
+	boolean _synchronousDataStream;
+	/** Action to call when Analytic needs reseting.
+	 *  @private */
+	action<> _reset;
+	/** Action to call when Analytic is deleted for any tidy up specific
+	 *  to a Tranform.
+	 *  @private */
+	action<> _onDelete;
+	
+	/** The original configuration used to create a new instance
+	 *  of a Analytic.
+	 *  @private **/
+	Analytic _config;
+	/** The cached copy of the user-defined callback action that 
+	 *  will be called to process any incoming Data events.
+	 *  @private **/
+	action<Data> _processData;
+	/** The cached copy of the user-defined callback action that 
+	 *  will be called to process any incoming Data events.
+	 *  @private **/
+	action<dictionary<string, Data> > _processDataStream;
+
+	/**
+    *  This action creates a new AnalyticObject instance, and 
+	 *  calls the user application back with an instance of the 
+	 *  AnalyticInterface once it is complete. 
+	 *  
+	 *  User-defined implementations of a Analytic can use the
+	 *  AnalyticInterface instance to control/manage the base 
+	 *  functionality of a Analytic.
+	 *
+	 *  The optional action arguments are optional in the sense that a full action need not be defined.
+	 *  For example, if you have no onDelete() action, you can call init with the onDelete argument
+	 *  as <font face="courier" size="-1">new action<></font>.
+	 *
+	 *  @param  config           The Analytic configuration object 
+	 *  @param  processData      Optional. The user-defined action that processes/manipulates 
+	 *                           each and every incoming Data event.
+	 *  @param  resetCb          Optional. User-defined action to be called when a analytic instance is ordered to
+	 *                           to be reset, triggered by an appropriate AnalyticManagement event.
+	 *  @param  initComplete     The user-defined action that is called once
+	 *                           the AnalyticObject has been completely initialised.
+	 *
+	 *  @see  com.industry.analytics.Data        The Data event that Analytics process.
+	 *  @see  com.industry.analytics.Analytic   The Analytic configuration object.
+	 *  @see  com.industry.analytics.AnalyticManagement  The Analytic management object.
+	 *  @see  com.industry.analytics.AnalyticInterface   The action interface that should
+	 *                                              used to control/manage the Analytic
+	 *                                              implementations base functionality.
+	 */	
+	action init( Analytic config,
+	             action<Data> processData,
+	             action<> resetCb,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		// Call the extended initialisation with default placeholders
+		initExtended( config,
+		              processData, 
+		              new action<dictionary<string, Data> >, 
+		              false, 
+		              resetCb,
+		              new action<>,
+		              initComplete );
+	}
+	
+  	/**
+    *  This action creates a new AnalyticObject instance, and 
+	 *  calls the user application back with an instance of the 
+	 *  AnalyticInterface once it is complete. This action is 
+	 *  the same as the <font face="courier" size="-1">init()</font>
+	 *  action, but allows more advanced options to be defined 
+	 *  (such as the processDataStream and onDelete actions).
+	 *  
+	 *  User-defined implementations of a Analytic can use the
+	 *  AnalyticInterface instance to control/manage the base 
+	 *  functionality of a Analytic.
+	 *
+	 *  The optional action arguments are optional in the sense that a full action need not be defined.
+	 *  For example, if you have no onDelete() action, you can call init with the onDelete argument
+	 *  as <font face="courier" size="-1">new action<></font>.
+	 *
+	 *  @param  config           The Analytic configuration object 
+	 *  @param  processData   Optional. The user-defined action that processes/manipulates 
+	 *                           each and every incoming Data event.
+	 *  @param  processDataStream  Optional. The user-defined action that processes/manipulates 
+	 *                           a set of Data events coming across several input channels, so that
+	 *                           they may be processed as a coherent group.
+	 *  @param  synchronous      Only relevant for processDataStream. If true processDataStream is only
+	 *                           called when the set of events all have the same timestamp. If false
+	 *                           then processDataStream is called every time a new Data is received.
+	 *  @param  resetCb          Optional. User-defined action to be called when a analytic instance is ordered to
+	 *                           to be reset, triggered by an appropriate AnalyticManagement event.
+	 *  @param  onDelete         Optional. User-defined action to be called when a analytic instance is ordered to
+	 *                           to be deleted, triggered by an appropriate AnalyticManagement event.
+	 *  @param  initComplete     The user-defined action that is called once
+	 *                           the AnalyticObject has been completely initialised.
+	 *
+	 *  @see  com.industry.analytics.Data        The Data event that Analytics process.
+	 *  @see  com.industry.analytics.Analytic   The Analytic configuration object.
+	 *  @see  com.industry.analytics.AnalyticManagement  The Analytic management object.
+	 *  @see  com.industry.analytics.AnalyticInterface   The action interface that should
+	 *                                              used to control/manage the Analytic
+	 *                                              implementations base functionality.
+	 */	
+	action initExtended( Analytic config,
+	                     action<Data> processData,
+	                     action<dictionary<string, Data> > processDataStream,
+	                     boolean synchronous,
+	                     action<> resetCb,
+	                     action<> onDelete,
+	                     action<boolean, AnalyticInterface> initComplete ) {
+		_id := integer.getUnique();
+		_getInputFromChannel := true;
+		
+		// Covert the set of Params to lower case for
+		// case-insensitive matching when the Analytic is created
+		dictionary<string,string> loweredParams := new dictionary<string,string>;
+		string currParam;
+		for currParam in config.params.keys() {
+			loweredParams.add( currParam.ltrim().rtrim().toLower(), config.params[ currParam ] );
+		}
+		// Replace the original params with the trimmed lower case version
+		config.params := loweredParams;
+		
+		_sendResultToChannel := config.getOrBoolean(SEND_TO_CHANNEL, false);
+		_sendResultToQueryChannel := config.getOrBoolean(SEND_TO_QUERY_CHANNEL, false);
+		_sendCallbacks := new dictionary<string, sequence<action<Data> > >;
+		_started := false;
+		
+		// Intern the input and output channel names to help performance.
+		string discard, mn;
+		for mn in config.inputDataNames {
+			discard := mn.intern();
+		}
+		for mn in config.outputDataNames {
+			discard := mn.intern();
+		}
+		
+		_config := config;
+		_managementId := config.getManagementId();
+		_manageAnalytic();
+		
+		_processData := processData;
+		_processDataStream := processDataStream;
+		_synchronousDataStream := synchronous;
+		_reset := resetCb;
+		_onDelete := onDelete;
+
+		// Construct the AnalyticInterface with the default set of actios
+		AnalyticInterface ti := new AnalyticInterface;
+		ti.getInputFromChannel := getInputFromChannel;
+		ti.addOutputConnection := addOutputConnection;
+		ti.reset := reset;
+		ti.start := start;
+		ti.stop := stop;
+		ti._processData := processData;
+		ti._processDataStream := processDataStream;
+		ti.sendData := sendData;
+		initComplete(true, ti);
+	}
+	
+	
+	/**
+	 *  Action to manage AnalyticManagement events. This will only happen
+	 *  if a valid managementId has been provided at init time.
+	 *
+	 *  @private
+	 */
+	action _manageAnalytic()
+	{
+		if _managementId = "" then
+		{
+			// Not configured to be dynamically managed.
+			return;
+		}
+		
+		monitor.subscribe( Constants.MANAGEMENT_CHANNEL);
+		
+		on all AnalyticManagement(analyticId=_managementId, command=Constants.DELETE) and
+		   not KillManagementChannelListeners(id=_id)
+		{
+			// Stop the input listeners.
+			stop();
+			// Kill the management listeners and ensure the instance can't be restarted via
+			// a AnalyticManagement event again. A custom monitor, which doesn't die, could still call
+			// start, but such a use case shouldn't be using this method to kill the instance in any case.
+			route KillManagementChannelListeners(_id);
+			// Do any Analytic specific tidy up.
+			ifpresent _onDelete
+			{
+				_onDelete();
+			}
+			log _config.name + " Analytic instance using analyticId '" + _managementId + "' deleted." at INFO;
+			// At the this point the stand alone service monitor instances should die from lack of code and listeners.
+			// We don't want to call die as this will explicitly kill custom monitors. They shouldn't really use
+			// the DELETE command via AnalyticManagement in any case.
+		}
+		
+		on all AnalyticManagement(analyticId=_managementId, command=Constants.RESET) and
+		   not KillManagementChannelListeners(id=_id)
+		{
+			// Reset the analytic.
+			reset();
+		}	
+
+		AnalyticManagement tm;
+		on all AnalyticManagement(analyticId=_managementId, command=Constants.START) :tm and
+		   not KillManagementChannelListeners(id=_id)
+		{
+			// Unless told otherwise, reset the analytic.
+			string reset := tm.params.getOr(Constants.RESET, "true");
+			if reset = "true" then {_reset();}
+			// Start the input listeners.
+			start();
+		}
+		
+		on all AnalyticManagement(analyticId=_managementId, command=Constants.STOP) and
+		   not KillManagementChannelListeners(id=_id)
+		{
+			// Stop the input listeners.
+			stop();
+		}	
+	}
+	
+	
+  	/**
+     *  This action enables the Analytic instance to 
+	 *  listen for the set of Data events associated with the 
+	 *  set defined in the Analytics <font face="courier" size="-1">inputDataNames</font> 
+	 *  configuration parameter that was used to create the new 
+	 *  AnalyticObject.
+	 *  
+	 *  This method should not be called directly, and should
+	 *  instead be called from the action com.industry.analytics.AnalyticInterface#getInputFromChannel
+	 *  action instead.
+	 *
+	 *  @param  flag  This Boolean flag indicates whether or not to listen 
+	 *                to in the incoming Data events.
+	 *  @private
+	 */		
+	action getInputFromChannel( boolean flag ) {
+		
+		// Only enable/disable input from the channel after 
+		// we have started the analytic
+		if( _started ) then {
+			// If we are enabling input from channel where 
+			// it was previously disabled
+			if( flag and not _getInputFromChannel ) then {
+				_getInputFromChannel := flag;
+				_startInputListener();
+			} else if( not flag and _getInputFromChannel ) then	{
+				// We are disabling input from channel where it was
+				// previously enabled
+				_stopInputListeners();
+			}
+		}
+		// Cache the new value
+		_getInputFromChannel := flag;
+	}
+	
+	
+   	/**
+     *  This action defines a specific action callback 
+	 *  that will be called when the Analytic generates a new  
+	 *  Data event.
+	 *  
+	 *  This method should not be called directly, and should
+	 *  instead be called from the action com.industry.analytics.AnalyticInterface#addOutputConnection
+	 *  action instead.
+   	 *
+   	 *  @param outputDataName The name of the output Data that the action callback is associated with.
+   	 *  @param callback          The user application defined action callback that will be called when the 
+   	 *                           Analytic generates a Data event.
+ 	 *  @private
+	 */	
+	action addOutputConnection( string outputDataName,
+	                            action<Data> callback ) {
+		_sendCallbacks.getOrAddDefault( outputDataName ).append( callback );
+	}
+	
+	
+	/**
+	 *  If a reset action has been provided during initialisation, the state
+	 *  of the analytic instance is reset as per this user defined function.
+	 *  In the general case, it is expected that this will reset the analytic
+	 *  instance back to it's initial startup state.
+	 *  @private
+	 */
+	action reset()
+	{
+		ifpresent _reset
+		{
+			_reset();
+		}
+		log _config.name + " using managementId " +
+			_managementId + " has been reset." at INFO;
+	}
+	
+	
+   	/**
+     *  This action enables the Analytic instance to start 
+	 *  listening to, and processing incoming Data events.
+	 *  
+	 *  This method should not be called directly, and should
+	 *  instead be called from the action com.industry.analytics.AnalyticInterface#start
+	 *  action instead.
+	 *  @private
+	 */	
+	action start() {
+		// Check if we are already started first
+		if( not _started ) then {
+			_startInputListener();
+			_started := true;
+			log "Analytic " + _config.name +
+				" started for inputDataNames " + _config.inputDataNames.toString() at INFO;
+		} else {
+			log "Analytic " + _config.name +
+			" already started for inputDataNames " + _config.inputDataNames.toString() at INFO;
+		}
+	}
+
+
+   	/**
+     *  This action stops the Analytic instance from listening to,
+	 *  and processing any further incoming Data events.
+  	 *  
+  	 *  This method should not be called directly, and should
+  	 *  instead be called from the action com.industry.analytics.AnalyticInterface#stop
+  	 *  action instead.
+  	 *  @private
+  	 */	
+	action stop()
+	{
+		// This kills all the input listeners.
+		// That means that if management is enabled then the management listeners keep the monitor alive.
+		// If there are no management listeners then this can only be called via the AnalyticInterface
+		// and it is the responsibiility of the caller to then keep itself alive.
+		_stopInputListeners();
+		_started := false;
+		log "Analytic " + _config.name +
+			" stopped for inputDataNames " + _config.inputDataNames.toString() at INFO;
+	}
+
+
+	/** 
+	 *  This action subscribes to any defined input channels
+	 *  and creates any listener for the incoming Data events.
+	 *  @private 
+	 */
+	action _startInputListener()
+	{
+		if _getInputFromChannel then
+		{
+			_currentDataStreams := {};
+			
+			string channel;
+			for channel in _config.inputDataNames
+			{
+				monitor.subscribe(channel);
+				_currentDataStreams[channel] := new Data;
+				_currentDataStreams[channel].streamName := channel;
+				Data dataIn;
+				on all Data(streamName=channel) :dataIn and
+				   not KillInputChannelListeners(id=_id)
+				{
+					ifpresent _processData
+					{
+						_processData(dataIn);
+					}
+
+					ifpresent _processDataStream
+					{
+						_currentDataStreams[dataIn.streamName] := dataIn;
+						if not _synchronousDataStream then
+						{
+							_processDataStream(_currentDataStreams.clone());
+						}
+						else
+						{
+							sequence<Data> datastream := _currentDataStreams.values();
+							decimal timestamp := datastream[0].timestamp;
+							Data d;
+							for d in datastream
+							{
+								if d.timestamp != timestamp then {return;}
+							}
+							_processDataStream(_currentDataStreams.clone());
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	/** 
+	 *  This action unsubscribes from any defined input channels
+	 *  and causes any listeners to be killed by routing the 
+	 *  KillInputChannelListeners.
+	 *  @private 
+	 */
+	action _stopInputListeners() {
+		// Make sure that we are started before trying 
+		// to unsubscribe, as unsubscribing from channels
+		// that were not subscribed to will cause an exception
+		if( _started and _getInputFromChannel ) then {
+			string channel;
+			for channel in _config.inputDataNames {
+				monitor.unsubscribe(channel);
+			}
+			route KillInputChannelListeners(_id);
+		}
+	}
+	
+	
+    /**
+     *  This action sends the specified Data event to the output.
+	 *  The method of sending the Data depends on the Analytics
+	 *  configuration, and whether one or more action callbacks have 
+	 *  been added.
+	 *
+	 *  @param dataOut  The Data event that it to be sent by the Analytic.
+	 */	
+	action sendData(Data dataOut)
+	{
+		// If we've not specified ANY other place to send the output data
+		// OR we've specified to send the result to the output data channel
+		if (_sendCallbacks.getOrDefault(dataOut.streamName).size() = 0 and not _sendResultToQueryChannel) or
+		   _sendResultToChannel then
+		{
+			send dataOut to dataOut.streamName;
+		} 
+		if _sendResultToQueryChannel then
+		{
+			send dataOut to QUERY_CHANNEL;
+		}
+		if _sendCallbacks.getOrDefault(dataOut.streamName).size() > 0 then
+		{
+			action<Data> cb;
+			for cb in _sendCallbacks[dataOut.streamName]
+			{
+				cb(dataOut);
+			}
+		}
+	}	
+	
+	/** This helper action returns the Analytic configuration.
+	 *  @returns The Analytic configuration object.
+	 *  @see     com.industry.analytics.Analytic  The Analytic configuration object
+	 */
+	action getConfig() returns Analytic {
+		return _config;
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern  
+ *  any string constants that are defined that are associated
+ *  with the Analytic object in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternAnalyticObject {
+	
+	action onload()	{
+		string discard := AnalyticObject.QUERY_CHANNEL.intern();
+		discard := AnalyticObject.SEND_TO_CHANNEL.intern();
+		discard := AnalyticObject.SEND_TO_QUERY_CHANNEL.intern();
+		
+		// Pend any Analytic requests until the Industry Analytics Kit is ready
+		Analytic analytic;
+		on (all Analytic():analytic -> Ready()) 
+		and not completed Ready() {
+			// Re-issue the request
+			send analytic to "";
+		}
+	
+		
+		// Process any unmatched Analytic requests that are received after the Industry Analytics Kit is ready
+		Analytic unmatchedAnalytic;
+		on completed Ready() 
+		-> all unmatched Analytic():unmatchedAnalytic {
+			// If the name was not lower case, try it lowered.
+			if( unmatchedAnalytic.name != unmatchedAnalytic.name.toLower() ) then {
+				unmatchedAnalytic.name := unmatchedAnalytic.name.toLower();
+				send unmatchedAnalytic to "";
+			} else {
+				log "Received Analytic setup request for unrecognised analytic " + unmatchedAnalytic.name +
+					". Either the analytic has not yet been loaded into the correlator or the name is incorrect." at ERROR;
+			}
+		}
+	}
+}

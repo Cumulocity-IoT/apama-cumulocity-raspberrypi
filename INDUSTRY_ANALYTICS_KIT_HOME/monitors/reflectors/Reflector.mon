@@ -1,0 +1,83 @@
+//*****************************************************************************
+// Title:         Reflector
+// Description:   Reflects Data events from the main context to the context of their name.
+//				  Required in certain circumstances, such as with JMS when all events
+//				  arrive on the main context.
+//				  The assumption for this monitor is that all Data events on the
+//				  main context will need reflecting, as normally they would
+//				  be expected to be sent to their correct channel.
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+/** 
+ *  This event enables the Data reflector so that 
+ *  any Data events that received on the main context,
+ *  are sent to the Data context (defined by the Data events 
+ *  <font face="courier" size="-1">name</font> parameter)
+ * 
+ *  @see com.industry.analytics.Data   The Data event
+ *  @see com.industry.analytics.Reflector The Data Reflector monitor
+ *  @see com.industry.analytics.DisableDataReflector The event to disable the Data event reflector
+ */
+event EnableDataReflector {}
+
+/** 
+ *  This event disables the Data reflector (if it was 
+ *  enabled previously) so that any Data events that received 
+ *  on the main context, are no longer sent to the Data context  
+ *  (defined by the Data events <font face="courier" size="-1">name</font> parameter)
+ * 
+ *  @see com.industry.analytics.Data   The Data event
+ *  @see com.industry.analytics.Reflector The Data Reflector monitor
+ *  @see com.industry.analytics.EnableDataReflector  The event to enable the Data event reflector
+ */
+event DisableDataReflector {}
+
+/** 
+ *  This monitor reflects Data events from the main context 
+ *  to the context defined by the Data events <font face="courier" size="-1">name</font> parameter.
+ * 
+ *  This is required in some circumstances, such as when using JMS 
+ *  integration, where all events arrive on the main context.
+ *
+ *  The assumption for this monitor is that all Data events on the
+ *  main context will need reflecting, as normally they would
+ *  be expected to be sent to their correct channel.
+ *  
+ *  Data events are not reflected by default, as this could cause
+ *  both performance and correctness problems in some cases (application
+ *  dependant).
+ * 
+ *  @see com.industry.analytics.Data                 The Data event
+ *  @see com.industry.analytics.EnableDataReflector  The event to enable the Data event reflector
+ *  @see com.industry.analytics.DisableDataReflector The event to disable the Data event reflector
+ */
+monitor Reflector {
+
+	/** @private */
+	action onload() {
+		on all EnableDataReflector() {
+			Data currData;
+			on all Data():currData
+			and not EnableDataReflector()
+			and not DisableDataReflector() {
+				send currData to currData.streamName;
+			}
+		}
+	}
+}

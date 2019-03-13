@@ -1,0 +1,275 @@
+//*****************************************************************************
+// Title:         DataSourceService
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.exceptions.Exception;
+using com.apama.memorystore.Iterator;
+using com.apama.memorystore.Row;
+
+/**
+ *  This request should be sent to the DataSourceService channel
+ *  "DATASOURCE_MGMT_CHANNEL" when requesting the set of child DataSources that are
+ *  associated with the DataSource specified.  Note that the entire
+ *  hierachy of associated child DataSources are returned in the response, 
+ *  not just the direct children of a specified DataSource.
+ *   
+ *  Applications must listen for the <font face="courier" size="-1">com.industry.analytics.DataSourceIdsResponse</font>
+ *  events that are sent in response to this request on the DataSourceService channel
+ *  (I.E. "DATASOURCE_MGMT_CHANNEL").
+ *
+ *  @see com.industry.analytics.DataSourceIdsResponse  The response event to this request. 
+ *  @see com.industry.analytics.DataSource             The definition of an DataSource object. 
+ */
+event SourceIdsRequest {
+	/** The unique identifier of the Data source to get the set of
+	 *  associated Data Sources for. */
+	string sourceId;
+	/** Boolean value indicating whether all DataSource IDs or  
+	 *  only the leaf nodes will be returned in the request. */
+	boolean onlyLeafNodes;
+}
+
+/**
+ *  This event is sent in response to the to the 
+ *  <font face="courier" size="-1">com.industry.analytics.DataSourceIdsRequest</font> on the DataSource
+ *  Service channel (I.E. "DATASOURCE_MGMT_CHANNEL") which requests the
+ *  set of associated DataSources for the one specified. Note that the entire 
+ *  hierachy of associated child DataSources are returned in the response,  
+ *  not just the direct children of a specified DataSource.
+ *   
+ *  @see com.industry.analytics.SourceIdsRequest  The request event that this event is sent in response to.
+ *  @see com.industry.analytics.DataSource        The definition of an DataSource object. 
+ */
+event SourceIdsResponse {
+	/** The unique identifier of the DataSource that the set of
+	 *  associated DataSources was originally requested for. */
+	string sourceId;
+	/** A sequence containing the set of associated DataSource Ids. */
+	sequence<string> sourceIds;
+}
+
+/** 
+ *  The DataSourceService manages the set of DataSources for the Industry Analytics Kit
+ *  and their relationships to one another (in the form of a tree heirachy).  It also
+ *   allows user applications to query the set of DataSource information.
+ *
+ *  @listens com.industry.analytics.DataSourceIdsRequest  The request event to retrieve all DataSource 
+ *                                                        data associated with a specified DataSource
+ *  @sends com.industry.analytics.DataSourceIdsResponse   The response to a com.industry.analytics.DataSourceIdsRequest request. 
+ *
+ *  @see com.industry.analytics.DataSource                The definition of an DataSource object.
+ *
+ *  @private
+ */
+persistent monitor DataSourceService {
+	constant string PARENT_DATASOURCE_ID := "parentId";
+	constant string IDS_REQUEST_HANDLER  := "IdsRequestHandler";
+	
+	Cache _dataSourceCache;
+	Cache _dataSourceParamCache;
+	
+	boolean _dataSourceCacheReady := false;
+	boolean _dataSourceParamCacheReady := false;
+	
+	
+	action onload() {
+		string discard := PARENT_DATASOURCE_ID.intern();
+		discard := IDS_REQUEST_HANDLER.intern();
+		
+		// Setup Memory Store cache for the Data Source information
+		_dataSourceCache.init( DataSource.TABLE_NAME,
+		                       DataSource.getFieldNames(),
+		                       DataSource.getFieldTypes(),
+		                       true,
+		                       false,
+		                       _cacheReady);
+		
+		// Setup Memory Store cache for the Data Source parameter set.
+		_dataSourceParamCache.init( DataSourceParam.TABLE_NAME,
+		                            DataSourceParam.getFieldNames(),
+		                            DataSourceParam.getFieldTypes(),
+		                            true,
+		                            false,
+		                            _cacheReady);
+	}
+	
+	
+	action _cacheReady( string tableName, boolean flag )
+	{
+		if( tableName = DataSource.TABLE_NAME ) then {
+			_dataSourceCacheReady := true;
+		} else if( tableName = DataSourceParam.TABLE_NAME ) then {
+			_dataSourceParamCacheReady := true;
+		}
+		if( not flag ) then {
+			log "Error setting up DataSource cache." at ERROR;
+			return;
+		}
+		
+		log tableName+" cache ready." at INFO;
+		monitor.subscribe(Constants.DATASOURCE_MGMT_CHANNEL);
+		
+		// Listen for any requests to add a new DataSource		
+		on all AddDataSource() as ads {
+			_addDataSource( DataSource.init( ads.id, ads.sourceTypeId, ads.name, 
+			                                 ads.description, ads.parentId, ads.params ) );	
+		}
+			
+		// Listen for any requests to add a new DataSource
+		on all DataSource() as ds {
+			_addDataSource( ds );
+		}
+		
+		// Listen for any requests to get the sourceId information
+		on all SourceIdsRequest() as request {
+			spawn _dataSourceIdsRequestHandler( request ) to context(IDS_REQUEST_HANDLER);
+		}
+	}
+
+	// This helper action adds a new DataSource to the tree 
+	action _addDataSource( DataSource ds ) {
+		// Intern DataSource ids for performance.
+		string discard := ds.id.intern();
+		
+		// Check if the DataSource has an associated Parent sourceId
+		if( ds.parentId != "" ) then {
+			// Get the parent DataSource
+			DataSource parentSource := new DataSource;
+			parentSource.populateFromRow( _dataSourceCache.get( ds.parentId ) );
+			
+			// Add the new Data sourceId to the set of child sourceIds  
+			// of the parent, and add it back to the cache 
+			parentSource.childIds.add( ds.id, false );
+			_dataSourceCache.add( parentSource.getRow );
+		}
+		
+		// Add the new DataSource to the cache
+		_dataSourceCache.add( ds.getRow );
+		
+		// Break up the parameters into their own set of key/value pair table
+		// This allows easier integration with UIs that cannot handle string 
+		// manipulation very well to parse the stringified dictionary of params
+		string key;
+		for key in ds.params.keys() {
+			DataSourceParam dataSourceParam := DataSourceParam( ds.id, key, ds.params[key] );
+			_dataSourceParamCache.add( dataSourceParam.getRow );
+		}
+	}
+	
+	// All nodes.
+	action _dataSourceIdsRequestHandler( SourceIdsRequest request ) {
+		sequence<string> sourceIds := new sequence<string>;
+		
+		// Check if we only want to return the leaf nodes 
+		if( request.onlyLeafNodes ) then {
+			sourceIds := _getLeafChildDataSourceIds( request.sourceId );
+		} else {
+			sourceIds := _getAllChildDataSourceIds( request.sourceId );
+		}
+		
+		// Ensure the identifiers are unique.
+		dictionary<string, boolean> uniqueIds := {};
+		string id;
+		for id in sourceIds {
+			uniqueIds[id] := false;
+		}
+		send SourceIdsResponse( request.sourceId, uniqueIds.keys() ) to Constants.DATASOURCE_MGMT_CHANNEL;
+	}
+	
+	
+	action _getAllChildDataSourceIds( string sourceId ) returns sequence<string> {
+		sequence<string> sourceIds := [];
+		
+		DataSource dataSource := new DataSource;
+		dataSource.populateFromRow( _dataSourceCache.get( sourceId ) );
+
+		// If the DataSource was found in the list
+		if( dataSource.id != "" ) then {
+			// Append the current source to the list too
+			sourceIds.append( sourceId );
+	
+			// Check if there were any children associated with this DataSource
+			if( dataSource.childIds.size() > 0 ) then {
+				// Iterate over the set of children and get their 
+				// associated child sourceIds too
+				string childSourceId;
+				for childSourceId in dataSource.childIds.keys() {
+					sourceIds.appendSequence( _getAllChildDataSourceIds( childSourceId ) );
+				}
+			}
+		}
+		return sourceIds;
+	}
+
+	
+	// Only leaf nodes.
+	action _getLeafChildDataSourceIds( string sourceId ) returns sequence<string> {
+		sequence<string> sourceIds := [];
+		
+		if( sourceId = "" ) then {
+			sourceIds := _getAllLeafIds();
+		} else {
+			sourceIds := _getChildLeafFromParent( sourceId );
+		}
+		return sourceIds;
+	}
+	
+	action _getChildLeafFromParent( string sourceId ) returns sequence<string> {
+		sequence<string> sourceIds := [];
+		
+		DataSource dataSource := new DataSource;
+		dataSource.populateFromRow( _dataSourceCache.get( sourceId ) );
+		
+		// Check if there the DataSource was valid and if there were
+		// any children associated with this DataSource (IE it was a leaf node)
+		if( dataSource.id != "" 
+		and dataSource.childIds.size() = 0 ) then {
+			sourceIds.append( sourceId );
+		} else {
+			// Iterate over the set of children and get their 
+			// associated child sourceIds too
+			string childSourceId;
+			for childSourceId in dataSource.childIds.keys() {
+				sourceIds.appendSequence( _getChildLeafFromParent( childSourceId ) );
+			}
+		}
+		return sourceIds;
+	}
+	
+	action _getAllLeafIds() returns sequence<string>
+	{
+		sequence<string> sourceIds := [];
+		Iterator iterator := _dataSourceCache.getIterator();
+		while not iterator.done()
+		{
+			Row row := iterator.getRow();
+			try	{
+				dictionary<string,boolean/*not_used*/> childSourceIds := 
+					dictionary<string,boolean>.parse( row.getString( "childIds" ) );
+				if( childSourceIds.size() = 0 ) then {
+					sourceIds.append( row.getKey() );
+				}
+			} catch(Exception e) {
+				// Do nothing
+			}
+			iterator.step();
+		}
+		return sourceIds;
+	}
+}

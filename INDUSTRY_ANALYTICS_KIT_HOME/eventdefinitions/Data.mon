@@ -1,0 +1,250 @@
+//*****************************************************************************
+// Title:         Data
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+using com.apama.exceptions.Exception;
+
+
+/** 
+ *  The DataConstants event object defines a set of constant
+ *  string values for the different types of Data that are
+ *  supported.
+ * 
+ *  @see com.industry.analytics.Data#type  The parameter that defines Data event objects type
+ */
+event DataConstants {
+	/** This constant defines the Data type as being 
+	 *  an Exception. */
+	constant string ANOMALY   := "a";
+	/** This constant defines the Data type as being 
+	 *  a result derived from a Analytic. */
+	constant string COMPUTED  := "c";
+	/** This constant defines the Data type as being 
+	 *  data received directly from outside the 
+	 *  Analytics. */
+	constant string RAW       := "r";
+}
+
+
+event DataDetails {
+	string name;
+	string description;
+	string units;
+	wildcard dictionary<string, string> paramNamesAndTypes;
+}
+
+
+/** 
+ *  The Data event is a normalized event structure which is used
+ *  within the framework for passing around values. Events coming into 
+ *  the Correlator from external sources will need to be converted prior 
+ *  to use within the framework. The structure of the event that carries 
+ *  both incoming (raw) data and the computed data within a 
+ *  Analytic network.
+ */
+event Data {
+	/** The name of the Data stream. */
+	string streamName;
+	/** The enumerated type that states what type the Data is.
+	 *  This should be set to one of the values defined in the 
+	 *  com.industry.analytics.DataConstants event.
+	 *
+	 *  @see com.industry.analytics.DataConstants  The set of constants that 
+	 *                                          define the types of Data events available
+	 */
+	string type;
+	/** The unique identifier of the source of the Data. 
+	 *  This may be a sensor or a higher level entity for an aggregated 
+	 *  Data stream. */
+	string sourceId;
+	/** The timestamp the Data was generated, represented as the number of 
+	  * seconds since the epoch (1st January 1970). */
+	decimal timestamp;
+	/** The value of the Data as a decimal. */
+	decimal dValue;
+	/** The value of the Data as a string. */
+	string sValue;
+	/** The x, y and z values are intended primarily for supplementing
+	 *  the data in dValue or sValue, such as a location. Other use is,
+	 *  however, not proscribed and they can be used generically as long
+	 *  as the associated Analytics act on them as required. */
+	/** The value of a float */
+	float xValue;
+	/** The value of a float */
+	float yValue;
+	/** The value of a float */
+	float zValue;
+	/** This stringified dictionary is available to hold any other data 
+	 *  associated with the Data. */
+	wildcard dictionary<string, string> params;
+
+
+	/** This static action initialises a new Data for a given channel
+	 *  and sourceId.
+	 *
+	 *  @param name Channel name for the event.
+	 *  @param type Whether the event is raw, computed or an anomaly.
+	 *  @param sourceId The sourceId for the event.
+	 *
+	 *  @returns The new Data event.
+	 */
+	static action init(string name, string type, string sourceId) returns Data
+	{
+		Data currData := new Data;
+		currData.streamName := name;
+		currData.type       := type;
+		currData.sourceId   := sourceId;
+		return currData;
+	}
+	
+	
+	/** This private action interns the strings for the Data event 
+	 *  in order to improve performance when handling strings.
+	 *  @private
+	 */
+	action intern()	{
+		string field;
+		for field in self.getFieldNames() {
+			string discard := field.intern();
+		}
+	}
+
+	
+	/** This private action creates a unique MemoryStore Row key
+	 *  for the Data event, in order to store the Data data
+	 *  in MemoryStore. 
+	 *  
+	 *  See the relevant SoftwareAG Apama documentation for further
+	 *  details on the MemoryStore interface.
+	 *  @private
+	 */
+	action getKey() returns string
+	{
+		return streamName + Constants.SPACER + sourceId;
+	}
+
+	
+	/** This private action returns the key fields
+	 *  for the Data event. These can be used with the dataviews. 
+	 *  
+	 *  See the relevant SoftwareAG Apama documentation for further
+	 *  details on the DataView interface.
+	 *  @private
+	 */
+	static action getKeyFields() returns sequence<string>
+	{
+		return ["streamName", "sourceId"];
+	}
+	
+	
+	/** This private action returns a filled in MemoryStore Row using  
+	 *  the specified MemoryStore Table, based on the information  
+	 *  provided in the current Data event instance.  This is used 
+	 *  to store the Data data in MemoryStore. 
+	 *  
+	 *  See the relevant SoftwareAG Apama documentation for further
+	 *  details on the MemoryStore interface.
+	 *  @private
+	 */
+	action getRow(com.apama.memorystore.Table t) returns com.apama.memorystore.Row	{
+		com.apama.memorystore.Row row := t.get(getKey());
+		row.setString(  "streamName", streamName);
+		row.setString(  "type", type);
+		row.setString(  "sourceId", sourceId);
+		row.setDecimal( "timestamp", timestamp * 1000.0d);  // Dashboards run off ms timestamps.
+		row.setDecimal( "dValue", dValue);
+		row.setString(  "sValue", sValue);
+		row.setFloat(   "xValue", xValue);
+		row.setFloat(   "yValue", yValue);
+		row.setFloat(   "zValue", zValue);
+		row.setString(  "params", params.toString());
+		return row;
+	}
+
+
+	/** This private action retrieves Data information from the 
+	 *  provided MemoryStore row.  This is used to populate the 
+	 *  current Data event.  Any data that was in the Data event 
+	 *  prior to calling this action will be overwritten.
+   	 *  
+   	 *  See the relevant SoftwareAG Apama documentation for further
+   	 *  details on the MemoryStore interface.
+   	 *  @private
+   	 */
+	action populateFromRow(com.apama.memorystore.Row row)
+	{
+		streamName := row.getString(  "streamName");
+		type       := row.getString(  "type");
+		sourceId   := row.getString(  "sourceId");
+		timestamp  := row.getDecimal( "timestamp") / 1000.0d;  // Dashboards run off ms timestamps.
+		dValue     := row.getDecimal( "dValue");
+		sValue     := row.getString(  "sValue");
+		xValue     := row.getFloat(   "xValue");
+		yValue     := row.getFloat(   "yValue");
+		zValue     := row.getFloat(   "zValue");
+		
+		if( row.inTable() ) then {
+			try	{
+				params := params.parse(row.getString("params"));
+			} catch (Exception e)	{
+				params := {};
+				log "Unable to parse params dictionary from string '" + row.getString("params") +
+					"' for Data " + streamName +
+					", sourceId" + sourceId +
+					", timestamp " + timestamp.toString() at ERROR;
+			}
+		} else {
+			params := {};
+		}
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the Data event in order to improve performance
+ *  when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternData {
+	event StayAlive {}
+	
+	action onload()	{
+		(new Data).intern();
+
+		string discard := DataConstants.ANOMALY.intern();
+		discard := DataConstants.COMPUTED.intern();
+		discard := DataConstants.RAW.intern();
+		string fieldName;
+		for fieldName in Data.getFieldNames()
+		{
+			discard := fieldName.intern();
+		}
+		on all StayAlive() {}
+	}
+}

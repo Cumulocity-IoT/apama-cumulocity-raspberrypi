@@ -1,0 +1,58 @@
+//*****************************************************************************
+// Title: SpeedService
+//
+// Copyright (c) 2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.geolocation;
+
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Ready;
+
+/** 
+ *  The SpeedService monitor listens for requests to 
+ *  create a new Speed Analytic object, and creates
+ *  the Analytic in a new unique context.
+ *
+ *  @listens com.industry.analytics.Analytic           The event that requests the creation of a new Analytic object
+ *  @see     com.industry.analytics.geolocation.Speed  The implementation of the Speed Analytic.
+ *
+ *  @private 
+ */
+persistent monitor SpeedService {
+
+	action onload() {
+		// Process any Analytic requests after the Industry Analytics Kit is ready
+		on Ready() ->
+		all ( Analytic( name=Speed.NAME ) as c or Analytic( name=Speed.NAME.toLower() ) as c ) {
+			spawn _setup(c) to context(Speed.NAME + integer.getUnique().toString());
+		}
+	}
+	
+	
+	action _setup(Analytic config) {
+		(new Speed).init(config, _initComplete);
+	}
+	
+	action _initComplete(boolean success, AnalyticInterface tInterface) {
+		if( success ) then {
+			tInterface.start();
+		} else {
+			log "Error spawning Speed instance." at ERROR;
+			die;
+		}
+	}
+}

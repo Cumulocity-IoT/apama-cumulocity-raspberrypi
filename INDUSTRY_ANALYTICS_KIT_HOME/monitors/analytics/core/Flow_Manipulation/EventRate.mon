@@ -1,0 +1,473 @@
+//*****************************************************************************
+// Title: EventRate Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.flow_manipulation;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+/* @AnalyticDefinition
+{
+	"name": "EventRate",
+	"description": "Calculates the rate of events recieved (events/second).",
+	"group": "Flow Manipulation",
+	"documentation": "com/industry/analytics/flow_manipulation/EventRate.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel for which to calculate the event rate"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Event Rate",
+			"description": "The event rate (events/second)",
+			"dataProperties": ["+dValue"]
+		}
+	],
+	"properties": [
+		{
+			"name": "useCorrelatorTime",
+			"description": "Defines whether to use the Correlator time or alternatively use the events timestamp",
+			"type": "boolean",
+			"defaultValue": false,
+			"optional": true
+		},{
+			"name": "smoothingFactor",
+			"description": "Defines the number of events over which to calculate/smooth the event rate calculation",
+			"type": "integer",
+			"defaultValue": 3,
+			"optional": true,
+			"validator": "function(value) { return value >= 2 || 'Value must be greater than or equal to 2' }"
+		},{
+			"name": "publishRate",
+			"description": "Defines the period between which the event rates are published. If the value is zero, the calculation is published for every incoming event.",
+			"type": "decimal",
+			"defaultValue": 1.0,
+			"optional": true,
+			"validator": "function(value) { return value >= 0.0 || 'Value must be greater than or equal to 0.0' }",
+			"postfix": "(Seconds/Event)"
+ 		},{
+			"name": "bySourceId",
+			"description": "If defined, the Event Rate calculations are partitioned based on the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"defaultValue": true,
+			"optional": true,
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The EventRate Analytic outputs the rate of arrival of events on 
+ *  the specified input channel. This rate can be derived based on either
+ *  the correlator time or on the timestamps of the <font face="courier" size="-1">Data</font> events. 
+ *  
+ *  The calculated event rate is published at a rate defined by the 
+ *  <font face="courier" size="-1">publishRate</font> parameter.  If a value of
+ *  <font face="courier" size="-1">0.0d</font> is provided, then the calculation
+ *  is sent everytime an input event is received.  In the correlator time mode,
+ *  a wait listener is setup to ensure an event rate is output even when no  
+ *  input Data events are received. This is not possible for the timestamp mode,  
+ *  as time is being driven entirely by the timestamp of the Data events received. 
+ *  If the <font face="courier" size="-1">bySourceId</font> parameter is set to  
+ *  <font face="courier" size="-1">true</font>, then the listener will be enabled    
+ *  AFTER the first <font face="courier" size="-1">Data</font> event is received 
+ *  for the new <font face="courier" size="-1">sourceId</font>. This means that if  
+ *  no input events are received, no output events will be sent.
+ * 
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. 
+ *      As this analytic is generating new data, not dependent on the values of
+ *      the incoming Data events, no params are copied from the incoming events.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>useCorrelatorTime</b></td><td>Defines whether to use the Correlator time or alternatively use the events timestamp</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">false</font></td></tr>
+ *  <tr><td><b>smoothingFactor</b></td><td>Defines the number of events over which to calculate/smooth the event rate calculation.</td>
+ *      <td>>= 2</td><td>Integer</td><td>False</td><td><font face="courier" size="-1">3</font></td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the Event Rate calculations are partitioned based on the <font face="courier" size="-1">sourceId</font> parameter of the input data stream</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  <tr><td><b>publishRate</b></td><td>Defines the rate at which the Event Rate calculations are published on the output channel per-sourceId. A value of <font face="courier" size="-1">0.0d</font> indicates that the calculation is published for each event received.</td>
+ *      <td>>=0.0d</td><td>Decimal</td><td>False</td><td><font face="courier" size="-1">1.0d</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+ <dd><code>
+// Define a EventRate Analytic which takes Data events on the channel "Input1"  
+// and calculates the rate at which events are being received on that channel
+// based on the Data events timestamp and publishes an event on the "Output1" channel. 
+send com.industry.analytics.Analytic("EventRate", ["Input1"], ["Output1"], new dictionary&ltstring,string&gt ) to "";
+
+// Define a EventRate Analytic which takes Data events on the channel "Input1"  
+// and calculates the rate at which events are being received on that channel 
+// based on the Correlator time and the last 10events and publishes an event 
+// on the "Output1" channel. 
+send com.industry.analytics.Analytic("EventRate", ["Input1"], ["Output1"], {"useCorrelatorTime":"true", "smoothingFactor":"10"} ) to "";
+</code></dd>
+ *</dl>
+ */ 
+event EventRate
+{
+	import "TimeFormatPlugin" as timeFormat;
+	
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "EventRate";
+	
+	/** This constant defines the configuration parameter name
+	 *  that defines the number of events that the rate is calculated over. */
+	constant string SMOOTHING_FACTOR := "smoothingFactor";
+	/** This constant defines the configuration parameter name
+	 *  that indicates what timestamp mode should be used. By default,
+	 *  the timestamp of the event is used instead of the Correlator time. */
+	constant string USE_CORRELATOR_TIME := "useCorrelatorTime";
+	/** This constant defines the configuration parameter name
+	 *  that indicates what the time between publishing the event rates. */
+	constant string PUBLISH_RATE := "publishRate";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the Event Rate calculation will be
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	// Algo specific variables
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	/** Local cached value for the smoothingFactor configuration parameter value
+	 *  @private */
+	integer _smoothingFactor;
+	/** Local cached boolean value indicating whether the correlatorOrTimestamp 
+	 *  configuration parameter was set to use the Correlator time versus 
+	 *  the event timestamp value.
+	 *  @private */
+	boolean _correlatorRate;
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId;
+	/** Local cached value for the smoothingFactor configuration parameter value
+	 *  @private */
+	decimal _publishRate;
+	/** Local cached timestamps for the incoming Data event that were received
+	 *  partitioned by the sourceId
+	 *  @private */
+	dictionary<string/*sourceId*/,sequence<decimal> > _lastInputTimestamps;
+		
+	/** Local cached timestamp for the last Data event that was sent
+	 *  partitioned by the sourceId
+	 *  @private */
+	dictionary<string/*sourceId*/,decimal> _lastOutputTimestamps;
+		
+	/** Local cached listener when using the Correlator Time mode
+	 *  partitioned by the sourceId
+	 *  @private */
+	dictionary<string/*sourceId*/,listener> _correlatorTimeout;
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ SMOOTHING_FACTOR, USE_CORRELATOR_TIME, 
+		      		                               BY_SOURCEID, PUBLISH_RATE ],
+		      		                           	 [ Constants.INTEGER, Constants.BOOLEAN,
+		      		                           	   Constants.BOOLEAN, Constants.DECIMAL ],
+		      		                           	 [ false, false, false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+			_correlatorRate := config.getOrBoolean( USE_CORRELATOR_TIME, false );
+			_bySourceId     := config.getOrBoolean( BY_SOURCEID, true );
+			
+			_smoothingFactor := config.getOrInteger( SMOOTHING_FACTOR, 3 );
+			if( _smoothingFactor <= 2 ) then {
+				log "  Param smoothingFactor must be greater than 1. Given value: " + _smoothingFactor.toString() at ERROR;
+				result := false;
+			}
+			_publishRate := config.getOrDecimal( PUBLISH_RATE, 1.0d );
+			if( _publishRate < 0.0d ) then {
+				log "  Param publishRate must be greater than or equal to 0.0d. Given value: " + _publishRate.toString() at ERROR;
+				result := false;
+			}
+
+			// Start a listener so that event rates are generated
+			// even if no events are received in the measurement period.
+			// Only do this if we aren't partitioned by the sourceId
+			// as we don't know what sourceIds are available until the
+			// first data event for them is received
+			if( not _bySourceId and _correlatorRate ) then {
+				_lastOutputTimestamps.add( CONST_INTERNAL_ALL_SOURCES, timeFormat.getTime().toDecimal() );
+				_lastInputTimestamps.getOrAddDefault( CONST_INTERNAL_ALL_SOURCES ).append( timeFormat.getTime().toDecimal() );
+				correlatorTimeout( CONST_INTERNAL_ALL_SOURCES );
+			}
+		} 
+		return result;
+	}
+	
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		decimal timestamp;
+		if( _correlatorRate ) then {
+			timestamp := timeFormat.getTime().toDecimal();
+		} else {
+			timestamp := dataIn.timestamp;
+		}
+		
+		// Take the first event as our starting point for timestamp rates.
+		if( not _lastInputTimestamps.hasKey( sourceId ) ) then {
+			_lastOutputTimestamps.add( sourceId, timestamp );
+			_lastInputTimestamps.getOrAddDefault( sourceId ).append( timestamp );
+			if( _correlatorRate ) then {
+				// Start a listener so that event rates are generated
+				// even if no events are received in the measurement period.
+				correlatorTimeout( sourceId );
+			}
+			return;
+		}
+		
+		// Remove the oldest value from the sequence as it's not required
+		if( _lastInputTimestamps[ sourceId ].size() >= _smoothingFactor ) then {
+			_lastInputTimestamps[ sourceId ].remove( 0 );
+		}
+		_lastInputTimestamps[ sourceId ].append( timestamp );
+
+		decimal elapsedTime := timestamp - _lastOutputTimestamps[ sourceId ];
+		if( elapsedTime >= _publishRate ) then {
+			// Send the calculated Event rate to the output channel
+			sendData( sourceId );
+		
+			if( _correlatorRate and _publishRate > 0.0d ) then {
+				// Start a listener so that event rates are generated
+				// even if no events are received in the measurement period.
+				correlatorTimeout( sourceId );
+			}
+		}
+	}
+	
+	/**
+	 *  This action is called internally and should not be called
+	 *  directly by the Users application.
+	 *
+	 *  @private
+	 */
+	action correlatorTimeout( string sourceId ) {
+		// Kill any existing listeners, as we are replacing it 
+		if( _correlatorTimeout.hasKey( sourceId ) ) then {
+			_correlatorTimeout[ sourceId ].quit();
+		}
+		listener localTimeout := on wait( _publishRate.toFloat() ) {
+			// Send a new data event
+			sendData( sourceId );
+			
+			// Create a new listener
+			correlatorTimeout( sourceId );
+		}
+		_correlatorTimeout.add( sourceId, localTimeout );
+	}
+
+	/**
+	 *  This action is called internally and should not be called
+	 *  directly by the Users application.
+	 *
+	 *  @private
+	 */
+	action sendData( string sourceId ) {
+		
+		decimal eventRate  := 0.0d;
+		integer eventCount := _lastInputTimestamps[ sourceId ].size()-1;
+		decimal headTime   := _lastInputTimestamps[ sourceId ][ eventCount ];
+
+		// Only calculate the event rate if we have at least 2 events
+		if( eventCount >= 1 ) then {
+			// Calculate the total elapsed time
+			decimal elapsedTime := headTime - _lastInputTimestamps[ sourceId ][ 0 ];
+			// Calculate the event rate based on the number of 
+			// intervals between events
+			eventRate := eventCount.toDecimal() / elapsedTime;
+		} 
+
+		// Create the output Data event
+		Data dataOut := new Data;
+		dataOut.streamName := _outputDataName;
+		dataOut.type       := DataConstants.COMPUTED;
+		dataOut.timestamp  := headTime;
+		dataOut.dValue     := eventRate;
+
+		if( not _bySourceId and sourceId=CONST_INTERNAL_ALL_SOURCES ) then {
+			dataOut.sourceId := "";
+		} else {
+			dataOut.sourceId := sourceId;
+		}
+		
+		// Publish the Data event 
+		_analyticObject.sendData( dataOut );
+
+		// Cache the publish time
+		if( _correlatorRate ) then {
+			_lastOutputTimestamps[ sourceId ] := timeFormat.getTime().toDecimal();
+		} else {
+			_lastOutputTimestamps[ sourceId ] := headTime;
+		}
+		                       
+		// Remove the oldest value
+		if( _lastInputTimestamps[ sourceId ].size() > 0 ) then {
+			_lastInputTimestamps[ sourceId ].remove( 0 );
+		}
+	}
+	
+
+	/**
+	 *  Optional action to reset the state of the analytic instance
+	 *  back to its initialisation state.
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @private
+	 */
+	action reset() {
+		// Start a listener so that event rates are generated
+		// even if no events are received in the measurement period.
+		// Only do this if we aren't partitioned by the sourceId
+		// as we don't know what sourceIds are available until the
+		// first data event for them is received
+		if( not _bySourceId and _correlatorRate ) then {
+			correlatorTimeout( CONST_INTERNAL_ALL_SOURCES );
+		} 			
+		_lastInputTimestamps.clear();
+		_lastOutputTimestamps.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the EventRate Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternEventRate {
+	event StayAlive {}
+	
+	action onload() {
+		string discard := EventRate.NAME.intern();
+		discard := EventRate.SMOOTHING_FACTOR.intern();
+		discard := EventRate.USE_CORRELATOR_TIME.intern();
+		discard := EventRate.BY_SOURCEID.intern();
+		discard := EventRate.CONST_INTERNAL_ALL_SOURCES.intern();
+		on all StayAlive() {}
+	}
+}

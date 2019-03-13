@@ -1,0 +1,129 @@
+//*****************************************************************************
+// Title: TimeWeightedVariance
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+
+/**
+ *  This event handles the storage and calculations
+ *  for a time weighted variance. Internally the
+ *  TimeWeightedMovingAverage event is used.
+ *  
+ *  The following formulas are implemented: 
+ * 
+ *  Moving average:
+ *  Standard formulation:
+ *  ma_n = a * x_n + (1 - a) * ma_n-1
+ *       = ma_n-1 + a * (x_n - ma_n-1)
+ *  a = (1 - e^-u)
+ *  u = (t_n - t_n-1) / T
+ *
+ *  Re-arrange for efficiency:
+ *  ma_n = (1 - a) * x_n + a * ma_n-1
+ *       = x_n + a * (ma_n-1 - x_n)
+ *  a = e^-u
+ *  u = (t_n - t_n-1) / T
+ *
+ *  Variance:
+ *  S_n  = a * S_n-1 + (1 - a)(x_n - ma_n)(x_n - ma_n-1)
+ *       = a * (S_n-1 + (1 - a)(x_n - ma_n-1)^2)
+ *
+ *  Standard deviation:
+ *  StDev = S_n^0.5
+ *
+ *  Note: If there are multiple values (x_n) for a particular timestamp (t_n) then the average is used
+ *  Note: If t_n < t_n-1 then the value is ignored
+ */
+event TimeWeightedVariance {
+	/** TimeWeightedMovingAverage event.
+	 *  @private */
+	TimeWeightedMovingAverage _twma;
+	/** Variance.
+	 *  @private */
+	decimal _eVar;
+	/** Variance for previous timestamp
+	 * @private */
+	decimal _eVar_tn_1;
+	/** Standard deviation.
+	 *  @private */
+	decimal _eStDev;
+
+
+	/** 
+	 *  Call this action immediately after creating a new instance of this event.
+	 *  Initialises the time weighted variance.
+	 *  
+	 *  @param	value	The first decimal value in the set of data to be analysed.
+	 *  @param	timestamp	The decimal timestamp when the first value was generated.
+	 *	@param	timeWindow	The time window for the weight: T in the above formulas.
+	 */
+	action init(decimal value, decimal timestamp, decimal timeWindow) {
+		_twma.init(value, timestamp, timeWindow);
+		_eVar := 0.0d;
+		_eVar_tn_1 := 0.0d;
+	}
+
+	/** 
+	 *  Returns the current moving average.
+	 *  
+	 *  @returns Moving average as a decimal value.
+	 */
+	action eMa() returns decimal {
+		return _twma.eMa();
+	}
+
+	/** 
+	 *  Returns the current variance.
+	 *  
+	 *  @returns Variance as a decimal value.
+	 */
+	action eVar() returns decimal {
+		return _eVar;
+	}
+
+	/** 
+	 *  Returns the current standard deviation.
+	 *  
+	 *  @returns Standard deviation as a decimal value.
+	 */
+	action eStDev() returns decimal {
+		return _eStDev;
+	}
+
+	/** 
+	 *  Updates the variance with a new data point.
+	 *  
+	 *  @param	value	The decimal value to be added to the variance.
+	 *  @param	timestamp	The decimal timestamp when the value was generated.
+	 */
+	action update(decimal value, decimal timestamp) {
+		if timestamp < _twma.currentTimestamp() {
+			log "Unable to update variance for timestamp in the past" at WARN;
+			return;
+		}
+		if timestamp > _twma.currentTimestamp() {
+			_eVar_tn_1 := _eVar;
+		}
+		_twma.update(value, timestamp);
+		ifpresent _twma.previousEMA() as previousEMA {
+			decimal avg_tn := _twma.currentSum() / _twma.currentCount();
+			_eVar := _twma.a() * (_eVar_tn_1 + (1.0d - _twma.a())*(avg_tn - previousEMA).pow(2.0d));
+			_eStDev := _eVar.sqrt();
+		}
+	}
+}

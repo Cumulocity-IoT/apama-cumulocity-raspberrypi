@@ -1,0 +1,153 @@
+//*****************************************************************************
+// Title:         Constants
+//
+// Copyright (c) 2015-2016 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics;
+
+/** The Constants event object defines the set of commonly 
+ *  used strings that are used in the Industry Analytics Kit
+ *  which may be useful for User Applications to use. */
+event Constants
+{
+	/** This constant defines the name of the channel 
+	 *  that is used by the Industry Analytics Kit for management events. */
+	constant string MANAGEMENT_CHANNEL := "ANALYTICS_MANAGEMENT_CHANNEL";
+	
+	/** Constant defining the Analytic Management DELETE command. */
+	constant string DELETE := "DELETE";
+	
+	/** Constant defining the Analytic Management RESET command. */
+	constant string RESET := "RESET";
+	
+	/** Constant defining the Analytic Management START command. */
+	constant string START := "START";
+
+	/** Constant defining the Analytic Management STOP command. */
+	constant string STOP := "STOP";
+	
+	/** The constant string that defines the name of the 
+	 *  Alert handling channel. */
+	constant string ALERT_CHANNEL := "ALERT_CHANNEL";
+	
+	/** The constant string that defines the name of the 
+	 *  Data Source handling channel. */
+	constant string DATASOURCE_MGMT_CHANNEL := "DATASOURCE_MGMT_CHANNEL";
+	
+	/** The constant string that defines the Boolean data type
+	 *  for configuration parameters (such as in the 
+	 *  <font face="courier" size="-1">params</font> data in a Data or Analytic
+	 *  event) */
+	constant string BOOLEAN := "boolean";
+	/** The constant string that defines the Decimal data type
+	 *  for configuration parameters (such as in the 
+	 *  <font face="courier" size="-1">params</font> data in a Data or Analytic
+	 *  event) */
+	constant string DECIMAL := "decimal";
+	/** The constant string that defines the Float data type
+	 *  for configuration parameters (such as in the 
+	 *  <font face="courier" size="-1">params</font> data in a Data or Analytic
+	 *  event) */
+	constant string FLOAT := "float";
+	/** The constant string that defines the Integer data type
+	 *  for configuration parameters (such as in the 
+	 *  <font face="courier" size="-1">params</font> data in a Data or Analytic
+	 *  event) */
+	constant string INTEGER := "integer";
+	/** The constant string that defines the Stringn data type
+	 *  for configuration parameters (such as in the 
+	 *  <font face="courier" size="-1">params</font> data in a Data or Analytic
+	 *  event) */
+	constant string STRING := "string";
+	/** The constant string that defines the Sequence of Strings data type
+	 *  for configuration parameters (such as in the 
+	 *  <font face="courier" size="-1">params</font> data in a Data or Analytic
+	 *  event) */
+	constant string SEQUENCE_STRING := "sequence<string>";
+	
+	/** This constant string is used to separate parameters
+	 *  used to construct a row key in MemoryStore. */
+	constant string SPACER := "_";
+	
+	/** This constant string defines the name of the Store used
+	 *  in MemoryStore. */
+	constant string STORE := "INDUSTRY_ANALYTICS";
+	
+	/** This constant string is added to anomaly data events to indicate the Analytic that generated it */
+	constant string ANOMALY_SOURCE := "anomalySource";
+	
+	constant string DVALUE := "dvalue";
+	constant string SVALUE := "svalue";
+	constant string XVALUE := "xvalue";
+	constant string YVALUE := "yvalue";
+	constant string ZVALUE := "zvalue";
+	constant string TYPE := "type";
+	constant string PARAM := "param";
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the common string constants in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator. 
+ *
+ *  @private
+ */
+monitor InternConstants
+{
+	event StayAlive {}
+	
+	action onload()
+	{
+		string discard := Constants.ALERT_CHANNEL.intern();
+		discard := Constants.DATASOURCE_MGMT_CHANNEL.intern();
+		
+		discard := Constants.MANAGEMENT_CHANNEL.intern();
+		discard := Constants.DELETE.intern();
+		discard := Constants.RESET.intern();
+		discard := Constants.START.intern();
+		discard := Constants.STOP.intern();
+		
+		discard := Constants.BOOLEAN.intern();
+		discard := Constants.DECIMAL.intern();
+		discard := Constants.FLOAT.intern();
+		discard := Constants.INTEGER.intern();
+		discard := Constants.STRING.intern();
+		discard := Constants.SEQUENCE_STRING.intern();
+		
+		discard := Constants.SPACER.intern();
+		discard := Constants.STORE.intern();
+
+		discard := Constants.DVALUE.intern();
+		discard := Constants.SVALUE.intern();
+		discard := Constants.XVALUE.intern();
+		discard := Constants.YVALUE.intern();
+		discard := Constants.ZVALUE.intern();
+		discard := Constants.TYPE.intern();
+		discard := Constants.PARAM.intern();
+		
+		discard := Constants.ANOMALY_SOURCE.intern();
+		on all StayAlive() {}
+	}
+}

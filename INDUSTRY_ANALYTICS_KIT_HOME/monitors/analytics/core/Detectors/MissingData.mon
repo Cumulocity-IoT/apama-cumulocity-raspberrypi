@@ -1,0 +1,491 @@
+//*****************************************************************************
+// Title: MissingData Analytic implementation
+//
+// Copyright (c) 2015-2017 Software AG, Darmstadt, Germany and/or its licensors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//*****************************************************************************
+
+package com.industry.analytics.detectors;
+
+using com.industry.analytics.Data;
+using com.industry.analytics.DataConstants;
+using com.industry.analytics.Analytic;
+using com.industry.analytics.AnalyticObject;
+using com.industry.analytics.AnalyticInterface;
+using com.industry.analytics.Constants;
+
+
+/** 
+ *  This event object is a cache of the Missing data used 
+ *  in the Analytic.  This is only used for 
+ *  internal purposes, and is not exposed to the Users 
+ *  application.
+ *  
+ *  @private
+ */
+event MissingDataData
+{
+	decimal lastTimestamp;
+	listener intervalWait;
+}
+
+/* @AnalyticDefinition
+{
+	"name": "MissingData",
+	"description": "Detect missing data in a stream.",
+	"group": "Detectors",
+	"documentation": "com/industry/analytics/detectors/MissingData.html",
+	"inputChannels": [
+		{
+			"name": "Data",
+			"description": "The channel to check for missing data"
+		}
+	],
+	"outputChannels": [
+		{
+			"name": "Missing Data",
+			"description": "The channel on which to output missing data anomalies",
+			"dataProperties": ["+dValue", "-sValue", "-xValue", "-yValue", "-zValue", "-params"]
+		}
+	],
+	"properties": [
+		{
+			"name": "interval",
+			"description": "Defines the time window that data must be received within. The actual units are based on the value of the intervalType parameter.",
+			"type": "decimal",
+			"optional": true,
+			"defaultValue": 4,
+			"advanced":true,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }"
+		},{
+			"name": "intervalType",
+			"description": "The type of the value that is used as the interval",
+			"type": "string",
+			"validValues": ["stddev", "seconds"],
+			"defaultValue": "stddev",
+			"optional": true
+		},{
+			"name": "repeats",
+			"description": "Defines the number of times an Anomaly Data is generated for missing data before stopping checking until another event for that sourceId is received again. (Zero is infinite)",
+			"type": "integer",
+			"optional": true,
+			"defaultValue": 1,
+			"validator": "function(value) { return value >= 0 || 'Value must be greater than or equal to 0' }"
+		},{
+			"name": "timeFactor",
+			"description": "Defines a scaling factor for the time window. This is applied regardless of if the EWMA or a fixed time period is configured",
+			"type": "decimal",
+			"optional": true,
+			"defaultValue": 3,
+			"advanced":true,
+			"validator": "function(value) { return value > 0 || 'Value must be greater than 0' }"
+		},{
+			"name": "bySourceId",
+			"description": "If defined, the Missing Data calculations are partitioned based on the sourceId parameter of the input data stream",
+			"type": "boolean",
+			"optional": true,
+			"defaultValue": "true",
+			"advanced":true
+		},{
+            "name": "managementId",
+            "description": "Defines the id used for management of the analytic",
+            "type": "string",
+            "optional": true,
+            "advanced": true
+        }
+	]
+}
+*/
+/**
+ *  The MissingData Analytic computation generates an Anomaly type of 
+ *  Data when no data is being received on the input channel. The 
+ *  period is a multiple of either a fixed time period in the configuration
+ *  or a weighted average calculated from the timings of events which have
+ *  been received. The computation will give out a set number of repeated 
+ *  anomalies after each subsequent multiple of the timeout period and can
+ *  also calculate the timeout based for each individual source or 
+ *  calculated across all the sources combined.
+ *
+ *  <dl><dt><b>Input Data events:</b></dt>
+ *  <dd>Only a single input Data stream name must be provided.</dd>
+ *  </dl>
+ *  <dl><dt><b>Output Data events:</b></dt>
+ *  <dd>Only a single output Data stream name must be provided. Only Data events of Anomaly type are generated.
+ *      No params are populated as by definition there are no input Mreasures when the output is generated.</dd>
+ *  </dl>
+ *  <dl><dt><b>Params:</b></dt>
+ *  <dd>
+ *  <table border="1" style="border-collapse: collapse;width:100%">
+ *  <tr><th>Param Name</th><th>Description</th><th>Valid Values</th><th>Data Type</th><th>Required</th><th>Default Value</th></tr>
+ *  <tr><td><b>interval</b></td><td>Defines the time window that data must be received within. The actual units are based 
+ *      on the value of the <font face="courier" size="-1">intervalType</font> parameter</td>
+ *      <td>Stringified decimal value <font face="courier" size="-1">> 0.0d</font></td><td>Decimal</td>
+ *      <td>False</td><td>4.0d</td></tr>
+ *	<tr><td><b>intervalType</b></td><td>Defines the unit type of the <font face="courier" size="-1">interval</font> parameter.</td>
+ *      <td><font face="courier" size="-1">"seconds"</font> or <font face="courier" size="-1">"stddev"</font></font></td><td>String</td>
+ *      <td>False</td><td><font face="courier" size="-1">"stddev"</font></td></tr>
+ *  <tr><td><b>repeats</b></td><td>Defines the number of times an Anomaly Data is generated for missing data
+ *                                 before stopping checking until another event for that sourceId is received again.</td>
+ *      <td>Stringified integer value <font face="courier" size="-1">>= 0</font></td><td>Integer</td>
+ *      <td>False</td><td><font face="courier" size="-1">1</font></td></tr>
+ *  <tr><td><b>timeFactor</b></td><td>Defines a scaling factor for the time window. This is applied regardless 
+ *                                    of if the EWMA or a fixed time period is configured</td>
+ *      <td>Stringified decimal value <font face="courier" size="-1">> 0</font></td><td>Decimal</td>
+ *      <td>False</td><td><font face="courier" size="-1">3</font></td></tr>
+ *  <tr><td><b>bySourceId</b></td><td>If defined, the Missing Data calculations are partitioned based on the sourceId parameter of the input data stream</td>
+ *      <td><font face="courier" size="-1">true</font> or <font face="courier" size="-1">false</font></td><td>Boolean</td><td>False</td><td><font face="courier" size="-1">true</font></td></tr>
+ *  </table></dd>
+ *  </dl>
+ *  <dl><dt><b>Example usage:</b></dt>
+<dd><code>
+// Define a MissingData Analytic for Data events on the channel "Input1"
+// and generate an anomaly Data event on the channel "Output1" if another event
+// from that sourceId has not been received on the input channel within a 10 second time period
+send com.industry.analytics.Analytic("MissingData", ["Input1"], ["Output1"], {"interval":"10.0"} ) to "";
+
+// Define a MissingData Analytic for Data events on the channel "Input2"
+// and generate an anomaly Data event on the channel "Output2" if another event
+// from that sourceId has not been received on the input channel within a time period calculated from the  
+// exponentially weighted moving average (EWMA) time between previous events on the same stream
+send com.industry.analytics.Analytic("MissingData", ["Input2"], ["Output2"], new dictionary&ltstring,string&gt ) to "";
+                                          
+// Define a MissingData Analytic for Data events on the channel "Input3"
+// and generate an anomaly Data event on the channel "Output3" if another event 
+// has not been received for the ANY sourceId on the input channel within a 10 second time period 
+send com.industry.analytics.Analytic("MissingData", ["Input3"], ["Output3"], {"interval":"10.0", "bySourceId":"false"} ) to "";
+</code></dd>
+  *  </dl>
+  */
+event MissingData
+{
+	/** This constant defines the name of the Analytic. */
+	constant string NAME := "MissingData";
+		
+	/** This constant defines the configuration parameter name
+	 *  that specifies the number of repeating times data is missed before
+	 *  terminating the check. */
+	constant string REPEATS := "repeats";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the time window value that data must be 
+	 *  received within. */
+	constant string INTERVAL := "interval";
+	/** This constant defines the configuration parameter name
+	 *  that specifies the type of the interval value defined. */
+	constant string INTERVAL_TYPE := "intervalType";
+	/** This constant defines the configuration parameter name
+	 *  that specifies a scaling factor for the time window. */
+	constant string TIMEFACTOR := "timeFactor";
+	/** This constant defines the configuration parameter name
+	 *  that defines whether or not the missing data calculation will be
+	 *  partitioned by the <font face="courier" size="-1">sourceId</font>*/
+	constant string BY_SOURCEID := "bySourceId";
+
+	/** Constant defining whether the given interval is defined in seconds.
+		@private */
+	constant string INTERVAL_SECONDS := "seconds";
+	/** Constant defining whether the given interval is a standard deviation multiple.
+		@private */
+	constant string INTERVAL_STD_DEV := "stddev";
+	/** This constant defines the internal name used to define "all sourceIds"
+	 *  used when not partitioning by sourceId.
+	 *  @private */
+	constant string CONST_INTERNAL_ALL_SOURCES := "__internalSourceIdWildcard";
+	
+	// Algo specific variables
+	/** Local cached set of the time windows, keyed by the 
+	 *  sourceId. If the time window is based on the combined 
+	 *  set of sources, the key used is the constant <font face="courier" size="-1">COMBINED</font>
+	 *  (I.E. "c").
+	 *  @private */
+	dictionary<string /*sourceId*/, decimal> _timeouts;
+	/** Local cached set of the missing data configuration, keyed by the 
+	 *  sourceId. If the time window is based on the combined 
+	 *  set of sources, the key used is the constant <font face="courier" size="-1">COMBINED</font>
+	 *  (I.E. "c").
+	 *  @private */
+	dictionary<string /*sourceId*/, MissingDataData> _data;
+	/** Local cached set of the number of times data has been missed, keyed by the 
+	 *  sourceId. If the time window is based on the combined 
+	 *  set of sources, the key used is the constant <font face="courier" size="-1">COMBINED</font>
+	 *  (I.E. "c").
+	 *  @private */
+	dictionary<string /*sourceId*/, integer> _missingCounts;
+	
+	/** Local cached output Data name
+	 *  @private */
+	string _outputDataName;
+	/** Local cached value for the repeats configuration parameter value
+	 *  @private */
+	integer _repeats; // Default 1
+	/** Local cached value for if we are partioning by the sourceId
+	 *  @private */
+	boolean _bySourceId; // Default true
+	/** Local cached value for the interval configuration parameter value
+	 *  @private */
+	decimal _interval; // Default to 4.0d
+	/** Local cached value for the interval type configuration parameter value
+	 *  @private */
+	string _intervalType; // Default to stddev
+	/** Local cached value for the timeFactor configuration parameter value
+	 *  @private */
+	decimal _timeFactor; // Default 3.0d
+
+	/** The Analytic Base Object implementation 
+	 *  @private */
+	AnalyticObject _analyticObject;
+	
+
+	/** 
+	 *  This action creates a new instance of the Analytic.
+	 *  Typically, this is called internally by the associated Analytics 
+	 *  service monitor when a com.industry.analytics.Analytic event is 
+	 *  sent for this type of Analytic.
+	 *
+	 *  @param  config        The Analytic configuration that 
+	 *                        will be used for this instance
+	 *  @param  initComplete  The action callback to call when the new Analytic  
+	 *                        has been created, or if an error occured.
+     *
+	 *  @see com.industry.analytics.Analytic           The Analytic configuration event object.
+	 *  @see com.industry.analytics.AnalyticInterface  The action interface that can be used 
+	 *                                            to interact with the Analytic.
+	 */
+	action init( Analytic config,
+	             action<boolean, AnalyticInterface> initComplete ) {
+
+		if( not _validateConfiguration( config ) ) then {
+			initComplete( false, new AnalyticInterface );
+			return;
+		}
+		
+		_analyticObject := new AnalyticObject;
+		_analyticObject.init( config,
+		                      processData,
+		                      reset,
+		                      initComplete );
+	}
+	
+	/** 
+	 *  This helper action validates configuration that was
+	 *  used when trying to create a new instance of the Analytic.
+	 *  This is called internally, and should not be called directly by 
+	 *  the Users application.
+	 *  
+	 *  @param   config  The Analytic configuration object that is being validated
+	 *  @returns A boolean value indicating whether the configuration was valid or not.
+	 * 
+	 *  @private
+	 */
+	action _validateConfiguration( Analytic config ) returns boolean {
+		boolean result := config.validateParams( NAME, 1, 1, 
+		                                         [ INTERVAL,           REPEATS,
+		                                           TIMEFACTOR,         BY_SOURCEID ],
+		                                         [ Constants.DECIMAL,  Constants.INTEGER,
+		      		                             	Constants.DECIMAL, Constants.BOOLEAN ],
+		      		                           	 [ false, false,
+		      		                           	   false, false ] );
+
+		// Only check the specific params if the validation was okay
+		if( result ) then {
+			// Cache the input/output channel names
+			_outputDataName := config.outputDataNames[0];
+			
+			_interval := config.getOrDecimal( INTERVAL, 4.0d );
+			if( _interval <= 0.0d ) then {
+				log "  Param interval must be positive. Given value: " + _interval.toString() at ERROR;
+				result := false;
+			}
+			
+			_intervalType := config.getOrString( INTERVAL_TYPE, INTERVAL_STD_DEV ).ltrim().rtrim().toLower();
+			if( _intervalType != INTERVAL_STD_DEV
+			and _intervalType != INTERVAL_SECONDS ) then {
+				log "  Param intervalType must be one of "+INTERVAL_STD_DEV+", or "+INTERVAL_SECONDS+". Given value: " + _intervalType.toString() at ERROR;
+				result := false;
+			}
+
+			_repeats := config.getOrInteger( REPEATS, 1 );
+			if( _repeats < 0 ) then {
+				log "  Param repeats must be 0 or positive. Given value: " + _repeats.toString() at ERROR;
+				result := false;
+			}
+			
+			_timeFactor := config.getOrDecimal( TIMEFACTOR, 3.0d );
+			if( _timeFactor <= 0.0d ) then {
+				log "  Param timeFactor must be positive. Given value: " + _timeFactor.toString() at ERROR;
+				result := false;
+			}
+			
+			_bySourceId := config.getOrBoolean( BY_SOURCEID, true );
+		}
+		
+		return result;
+	}
+	
+	/**
+	 *  This action implements the Analytic function itself. 
+	 *  This is called internally by the Analytic Object, and  
+	 *  should not be called directly by the Users application.
+	 *  If the application has created this Analytic using the 
+	 *  #init() action directly, then the <font face="courier" size="-1">processData</font>
+	 *  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	 *  that was returned should be used instead.
+	 *
+	 *  @param   dataIn  The input Data event to be processed by this Analytic
+	 * 
+	 *  @private
+	 */
+	action processData( Data dataIn ) {
+		log "Processing " + dataIn.toString() at DEBUG;
+		
+		// If we are using the optional parameter to partition based
+		// on the sourceId parameter
+		string sourceId := dataIn.sourceId;
+		if( not _bySourceId ) then {
+			sourceId := CONST_INTERNAL_ALL_SOURCES;
+		} 
+		
+		// First event for source
+		if( not _data.hasKey( sourceId ) ) then {
+			MissingDataData data := new MissingDataData;
+			data.lastTimestamp   := dataIn.timestamp;
+			_data[ sourceId ] := data;
+			
+			_timeouts[ sourceId ] := decimal.NAN;
+			return; 
+		}
+		
+		// Check to see if we have been missing this sourceId
+		if( _missingCounts.hasKey( sourceId ) ) then {
+			_missingCounts.remove( sourceId );
+		}
+
+		MissingDataData data := _data[ sourceId ];
+		decimal interval;
+		if( _intervalType = INTERVAL_STD_DEV ) then {
+			interval := dataIn.timestamp - data.lastTimestamp;
+		} else {
+			interval := _interval;
+		}
+
+		// Cache the latest timestamp of the data received
+		data.lastTimestamp := dataIn.timestamp;
+		
+		// Check if this is the first time interval hit
+		if( _timeouts[ sourceId ].isNaN() ) then {
+			_timeouts[ sourceId ] := interval;
+			// Wait for third event before setting up wait listener.
+		} else {
+			if( _intervalType = INTERVAL_STD_DEV ) then {
+				decimal weight := 0.2d; 
+				_timeouts[ sourceId ] := weight * interval +
+						   				 	 (1.0d - weight) * _timeouts[ sourceId ];
+			}
+			// Don't set a timer if the interval is zero
+			if( _timeouts[ sourceId ] > 0.0d ) then {
+				_setupWaitListener( _timeouts[ sourceId ], data, dataIn );
+			}
+		}		
+	}
+	
+	
+	/**
+	 *  This action is called internally and should not be called
+	 *  directly by the Users application.
+	 *
+	 *  @private
+	 */
+	action _setupWaitListener( decimal interval, MissingDataData data, 
+	                           Data dataIn ) {
+		data.intervalWait.quit();
+		data.intervalWait := on wait( (interval * _timeFactor).toFloat() ) {
+			Data dataOut := new Data;
+			dataOut.streamName   := _outputDataName;
+			dataOut.type         := DataConstants.ANOMALY;
+			dataOut.params[Constants.ANOMALY_SOURCE] := NAME;
+			dataOut.sourceId     := dataIn.sourceId;
+
+			// If we are using the optional parameter to partition based
+			// on the sourceId parameter
+			string sourceId := dataIn.sourceId;
+			if( not _bySourceId ) then {
+				sourceId := CONST_INTERNAL_ALL_SOURCES;
+			} 
+			
+			integer missingCount := _missingCounts.getOrDefault( sourceId ) + 1;
+			dataOut.timestamp    := dataIn.timestamp + missingCount.toDecimal() * interval * _timeFactor;
+			dataOut.dValue       := missingCount.toDecimal();
+
+			_missingCounts[sourceId] := missingCount;
+			_analyticObject.sendData(dataOut);
+
+			log "Missing " + _missingCounts[ sourceId ].toString() +
+				" Data(s) from sourceId" + dataIn.sourceId +
+				" after " + (missingCount.toDecimal() * interval * _timeFactor).toString() +
+				" seconds." at WARN;
+
+			if( _repeats = 0 or missingCount < _repeats ) then {
+				_setupWaitListener(interval, data, dataIn);
+			}
+		}
+	}
+	
+
+	/**
+	*  Optional action to reset the state of the analytic instance
+	*  back to its initialisation state.
+	*  This is called internally by the Analytic Object, and  
+	*  should not be called directly by the Users application.
+	*  If the application has created this Analytic using the 
+	*  #init() action directly, then the <font face="courier" size="-1">reset</font>
+	*  action on the <font face="courier" size="-1">com.industry.analytics.AnalyticInterface</font> 
+	*  that was returned should be used instead.
+	*
+	*  @private
+	*/
+	action reset() {
+		_timeouts.clear();
+		_data.clear();
+		_missingCounts.clear();
+	}
+}
+
+
+/** 
+ *  This internal Monitor is used to automatically intern 
+ *  any string constants that are defined that are associated
+ *  with the MissingData Analytic in order to improve  
+ *  performance when handling strings.
+ *
+ *  Note: The listener that is created is required in order
+ *        to keep the monitor alive between a Persistant  
+ *        Correlators recovery.  Otherwise, this would be a 
+ *        transient monitor, and it would not be recovered.  
+ *        Which would then mean that the strings would not
+ *        interned in the recovered Correlator.
+ *
+ *  @private
+ */
+monitor InternMissingData {
+	event StayAlive {}
+	
+	action onload()	{
+		string discard := MissingData.NAME.intern();
+		discard := MissingData.REPEATS.intern();
+		discard := MissingData.BY_SOURCEID.intern();
+		discard := MissingData.INTERVAL.intern();
+		discard := MissingData.TIMEFACTOR.intern();
+		discard := MissingData.CONST_INTERNAL_ALL_SOURCES.intern();
+		on all StayAlive() {}
+	}
+}

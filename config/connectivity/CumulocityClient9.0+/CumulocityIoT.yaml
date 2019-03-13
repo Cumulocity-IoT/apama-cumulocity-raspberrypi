@@ -1,0 +1,22 @@
+# $Copyright (c) 2016-2018 Software AG, Darmstadt, Germany and/or Software AG USA Inc., Reston, VA, USA, and/or its subsidiaries and/or its affiliates and/or their licensors.$
+# Use, reproduction, transfer, publication or disclosure is prohibited except as specifically provided for in your License Agreement with Software AG
+
+plugins:
+    ApamaConnectivityForCumulocityIoT:
+        classpath:
+           - ${APAMA_HOME}/lib/cumulocity/9.0/connectivity-cumulocity.jar
+        class: com.apama.cumulocity.Transport
+
+startChains:
+    CumulocityIoT:
+        - apama.eventMap:
+                    allowMissing: true
+        - ApamaConnectivityForCumulocityIoT:
+           requestAllDevices: true
+           subscribeToAllMeasurements: true
+           subscribeToDevices: true
+           tenant: ${CUMULOCITY_TENANT}
+           username: ${CUMULOCITY_USERNAME}
+           password: ${CUMULOCITY_PASSWORD}
+           appKey: ${CUMULOCITY_APPKEY}
+
