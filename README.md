@@ -11,7 +11,7 @@ The Temperature data is also being converted into a Industry Analytics Kit Data 
 ## Installation
 1. Download and install the latest Raspian image from https://downloads.raspberrypi.org/raspbian_full_latest
 
-2. Download and install the Cumulocity Agent for the Raspberry Pi. This is available from https://bitbucket.org/m2m/cumulocity-examples/src/7588ffa70ce358619ad0d912d5f6a6d0971a4687/device-integrations/raspberry-pi/
+2. Download and install the Cumulocity Agent for the Raspberry Pi. This is available from https://cumulocity.com/guides/device-tutorials/raspberry-pi-4/
 
 3. Download and install the “Apama Community Edition” from https://downloads.apamacommunity.com/apama-core/10.3.0.2/apama_core_10.3.0.2_armv7_linux.tar.gz
 
